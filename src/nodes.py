@@ -377,8 +377,14 @@ def write_files(state: AgentState) -> Dict:
         filename = f"{doc_id}-{slug}.md"
         full_path = os.path.join(docs_path, filename)
 
-        with open(full_path, "w") as f:
-            f.write(content)
+        # Ensure content is properly encoded as UTF-8
+        if isinstance(content, str):
+            content_utf8 = content
+        else:
+            content_utf8 = str(content)
+
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content_utf8)
         final_files.append(f"docs/{filename}")
         logger.info(f"   📄 Written {doc_id} ({written}/{total_docs})")
 
@@ -395,7 +401,7 @@ def write_files(state: AgentState) -> Dict:
         # Use project-relative link
         index_content += f"- [{title}]({filename})\n"
 
-    with open(os.path.join(docs_path, "index.md"), "w") as f:
+    with open(os.path.join(docs_path, "index.md"), "w", encoding="utf-8") as f:
         f.write(index_content)
     final_files.insert(0, "docs/index.md")
     logger.info("   ✅ Index file generated")
@@ -471,7 +477,7 @@ nav:
         filename = f"{doc_id}-{slug}.md"
         mkdocs_config += f"  - '{title}': {filename}\n"
 
-    with open(os.path.join(base_output_dir, "mkdocs.yml"), "w") as f:
+    with open(os.path.join(base_output_dir, "mkdocs.yml"), "w", encoding="utf-8") as f:
         f.write(mkdocs_config)
 
     logger.info("   ✅ MkDocs configuration generated")
@@ -614,13 +620,13 @@ def create_overview(state: AgentState) -> Dict:
         updated_index_content = existing_index  # Fallback to existing
 
     # Write updated index
-    with open(index_path, "w") as f:
+    with open(index_path, "w", encoding="utf-8") as f:
         f.write(updated_index_content)
 
     # Write the overview file
     overview_filename = "000-system-overview.md"
     overview_path = os.path.join(docs_path, overview_filename)
-    with open(overview_path, "w") as f:
+    with open(overview_path, "w", encoding="utf-8") as f:
         f.write(overview_content)
     logger.info("   📄 System overview file written")
 
@@ -634,7 +640,7 @@ def create_overview(state: AgentState) -> Dict:
     overview_nav = f"  - 'System Overview': {overview_filename}\n"
     updated_mkdocs = mkdocs_content.replace(nav_line, nav_line + overview_nav)
 
-    with open(mkdocs_path, "w") as f:
+    with open(mkdocs_path, "w", encoding="utf-8") as f:
         f.write(updated_mkdocs)
 
     logger.info("   ⚙️  MkDocs navigation updated")
