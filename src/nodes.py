@@ -143,6 +143,10 @@ def plan_documentation(state: AgentState) -> Dict:
         logger.error(f"Planning failed, falling back to defaults: {e}")
         plan = {"100": "Default", "200": "Default", "900": "Default", "980": "Default"}
 
+    # Remove "000" from plan since it's generated separately at the end
+    if "000" in plan:
+        del plan["000"]
+
     logger.info(f"Planned docs: {list(plan.keys())}")
     return {"planned_docs": plan}
 
