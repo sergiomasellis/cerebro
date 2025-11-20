@@ -4,6 +4,7 @@ import uuid
 import logging
 import asyncio
 import re
+from datetime import datetime
 from typing import Dict
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -16,6 +17,26 @@ from .utils import (
 )
 
 logger = logging.getLogger("cerebro")
+
+
+def extract_latest_date(content: str) -> str:
+    """Extract the latest last modified date from file headers in the content."""
+    pattern = r"Last modified: (\d{4}-\d{2}-\d{2} \d{2}:\d{2})"
+    dates = re.findall(pattern, content)
+    if not dates:
+        return datetime.now().strftime("%Y-%m-%d")
+    # Parse and find the latest
+    parsed_dates = []
+    for date_str in dates:
+        try:
+            parsed_dates.append(datetime.strptime(date_str, "%Y-%m-%d %H:%M"))
+        except ValueError:
+            continue
+    if not parsed_dates:
+        return datetime.now().strftime("%Y-%m-%d")
+    latest = max(parsed_dates)
+    return latest.strftime("%Y-%m-%d")
+
 
 # Define the global taxonomy as a constant to guide the LLM
 DOCS_TAXONOMY = """
@@ -139,20 +160,38 @@ async def generate_docs(state: AgentState) -> Dict:
 
     async def generate_single_doc(doc_id: str, reason: str):
         logger.info(f"Starting generation for {doc_id}...")
+        titles = {
+            "100": "Architecture Overview",
+            "101": "System Router",
+            "200": "Business Domain Overview",
+            "311": "REST API Endpoints",
+            "330": "Event Topics",
+            "421": "Main Entity Schema",
+            "500": "Key Dependencies",
+            "600": "Config and Environments",
+            "701": "Authentication Model",
+            "800": "Observability Overview",
+            "850": "Runbook Operations",
+            "900": "CI/CD Pipeline",
+            "930": "Risks and Decisions",
+            "980": "RAG Indexing Guidelines",
+        }
+        title = titles.get(doc_id, "Document")
+
         system_prompt = f"""
         You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
 
         Follow these strict rules:
         1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
         2. No YAML frontmatter.
-        3. Start with a top-level # Title.
+        3. Start with a top-level # {title}.
         4. Include a metadata table (Repo, Doc Type, Date).
         5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}".
         6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
         7. Use project-relative paths for file references, without markdown links.
-        8. Include a "Primary Sources" section at the end.
+        8. Include a "Primary Sources" section at the end. Do not use footnotes.
         9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
-        10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in ```language blocks (e.g., ```python, ```typescript).
+        10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in ```language blocks (e.g., ```python title="Descriptive title (filename.ext)", ```typescript).
         11. Use admonitions for important notes, warnings, or tips to enhance readability.
         """
 
@@ -214,7 +253,12 @@ def fix_linkages(state: AgentState) -> Dict:
             else:
                 return path  # leave as is
 
-        fixed_content = re.sub(pattern, replace_path, content)
+        # Split content by code block fences to avoid linking inside code blocks
+        parts = content.split("```")
+        for i in range(len(parts)):
+            if i % 2 == 0:  # Even indices are outside code blocks
+                parts[i] = re.sub(pattern, replace_path, parts[i])
+        fixed_content = "```".join(parts)
         fixed[doc_id] = fixed_content
 
     logger.info("Linkages fixed.")
@@ -241,7 +285,7 @@ def write_files(state: AgentState) -> Dict:
 
     generated = state["generated_content"]
 
-    # Taxonomy map for filenames
+    # Taxonomy map for filenames and titles
     names = {
         "100": "architecture-overview",
         "101": "system-router",
@@ -257,6 +301,22 @@ def write_files(state: AgentState) -> Dict:
         "900": "ci-cd-pipeline",
         "930": "risks-and-decisions",
         "980": "rag-indexing-guidelines",
+    }
+    titles = {
+        "100": "Architecture Overview",
+        "101": "System Router",
+        "200": "Business Domain Overview",
+        "311": "REST API Endpoints",
+        "330": "Event Topics",
+        "421": "Main Entity Schema",
+        "500": "Key Dependencies",
+        "600": "Config and Environments",
+        "701": "Authentication Model",
+        "800": "Observability Overview",
+        "850": "Runbook Operations",
+        "900": "CI/CD Pipeline",
+        "930": "Risks and Decisions",
+        "980": "RAG Indexing Guidelines",
     }
 
     final_files = []
@@ -278,11 +338,10 @@ def write_files(state: AgentState) -> Dict:
     sorted_ids = sorted(generated.keys())
     for doc_id in sorted_ids:
         slug = names.get(doc_id, "misc-doc")
+        title = titles.get(doc_id, slug.replace("-", " ").title())
         filename = f"{doc_id}-{slug}.md"
         # Use project-relative link
-        index_content += (
-            f"- [{doc_id} - {slug.replace('-', ' ').title()}]({filename})\n"
-        )
+        index_content += f"- [{title}]({filename})\n"
 
     with open(os.path.join(docs_path, "index.md"), "w") as f:
         f.write(index_content)
@@ -298,20 +357,56 @@ site_url: ''
 theme:
   name: material
   palette:
-    - scheme: default
-      primary: blue
-      accent: blue
+    # Palette toggle for automatic mode
+    - media: "(prefers-color-scheme)"
+      primary: black
+      accent: orange
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
   features:
-    - navigation.tabs
-    - navigation.sections
-    - toc.integrate
-    - search.suggest
-    - search.highlight
+     - navigation.tabs
+     - navigation.sections
+     - toc.integrate
+     - search.suggest
+     - search.highlight
+     - content.code.copy
+     - content.code.annotate
   icon:
     repo: fontawesome/brands/github
 
-repo_url: '{state["repo_url"]}'
-repo_name: '{state.get("repo_name")}'
+markdown_extensions:
+  - admonition
+  - footnotes
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
 
 nav:
   - Home: index.md
@@ -319,7 +414,7 @@ nav:
 
     for doc_id in sorted_ids:
         slug = names.get(doc_id, "misc-doc")
-        title = f"{doc_id} - {slug.replace('-', ' ').title()}"
+        title = titles.get(doc_id, slug.replace("-", " ").title())
         filename = f"{doc_id}-{slug}.md"
         mkdocs_config += f"  - '{title}': {filename}\n"
 
@@ -331,9 +426,28 @@ nav:
 
 
 def create_doc_subgraph(doc_id: str):
+    titles = {
+        "100": "Architecture Overview",
+        "101": "System Router",
+        "200": "Business Domain Overview",
+        "311": "REST API Endpoints",
+        "330": "Event Topics",
+        "421": "Main Entity Schema",
+        "500": "Key Dependencies",
+        "600": "Config and Environments",
+        "701": "Authentication Model",
+        "800": "Observability Overview",
+        "850": "Runbook Operations",
+        "900": "CI/CD Pipeline",
+        "930": "Risks and Decisions",
+        "980": "RAG Indexing Guidelines",
+    }
+    title = titles.get(doc_id, "Document")
+
     def node_func(state: AgentState) -> Dict:
         structure = state["file_listing"][0]
         relevant_content = read_relevant_files(state["local_path"], doc_id)
+        latest_date = extract_latest_date(relevant_content)
         llm = get_llm()
         system_prompt = f"""
         You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
@@ -341,14 +455,19 @@ def create_doc_subgraph(doc_id: str):
         Follow these strict rules:
         1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
         2. No YAML frontmatter.
-        3. Start with a top-level # Title.
+        3. Start with a top-level # {title}.
         4. Include a metadata table (Repo, Doc Type, Date).
-        5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}".
+        5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}" and use the Date: {latest_date}.
         6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
         7. Use project-relative paths for file references, without markdown links.
-        8. Include a "Primary Sources" section at the end.
+        8. Include a "Primary Sources" section at the end. Do not use footnotes.
         9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
-        10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in ```language blocks (e.g., ```python, ```typescript).
+        10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in MkDocs Material code blocks with advanced features:
+            - Use syntax highlighting: ```language
+            - Add descriptive titles for file snippets: ```language title="Descriptive title (filename.ext)"
+            - Add line numbers when showing multi-line code: ```language linenums="1"
+            - Highlight important lines: ```language hl_lines="2-4" (adjust line numbers based on context)
+            - Use annotations for explanations: add (1) in comments and explain below the block
         11. Include admonitions for important notes, warnings, or tips to enhance readability.
         """
 

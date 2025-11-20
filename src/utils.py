@@ -123,11 +123,11 @@ def read_key_files(root_path: str) -> str:
     total_chars = 0
     MAX_TOTAL_CHARS = 1_000_000  # Increased for large repos (~250k tokens)
 
-    # Initialize Repo object for git operations
+    # Initialize Repo object for git operations (not currently used)
     try:
-        repo = Repo(root_path)
+        Repo(root_path)
     except Exception:
-        repo = None
+        pass
 
     for root, dirs, files in os.walk(root_path):
         # Filter directories in-place

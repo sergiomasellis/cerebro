@@ -242,6 +242,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "mkdocs-material" },
     { name = "pydantic" },
+    { name = "pymdown-extensions" },
     { name = "python-dotenv" },
     { name = "ruff" },
 ]
@@ -259,6 +260,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.0.3" },
     { name = "mkdocs-material", specifier = ">=9.7.0" },
     { name = "pydantic", specifier = ">=2.12.4" },
+    { name = "pymdown-extensions", specifier = ">=10.17.1" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "ruff", specifier = ">=0.14.5" },
 ]
