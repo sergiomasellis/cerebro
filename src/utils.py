@@ -121,7 +121,7 @@ def read_key_files(root_path: str) -> str:
 
     content = []
     total_chars = 0
-    MAX_TOTAL_CHARS = 150_000  # Safety cap (~40k tokens)
+    MAX_TOTAL_CHARS = 1_000_000  # Increased for large repos (~250k tokens)
 
     # Initialize Repo object for git operations
     try:
@@ -146,55 +146,282 @@ def read_key_files(root_path: str) -> str:
             if is_key_file or is_github_workflow:
                 if total_chars >= MAX_TOTAL_CHARS:
                     content.append("\n--- [TRUNCATED: MAX SIZE REACHED] ---\n")
-                    return "\n".join(content)
+    return "\n".join(content)
 
-                path = os.path.join(root, file)
-                rel_path = os.path.relpath(path, root_path)
 
-                # Get Git metadata (Last Commit Date)
-                last_modified = "Unknown"
-                if repo:
-                    try:
-                        # Get last commit for this specific file
-                        # %cd = commit date, --date=iso-strict
-                        last_modified = repo.git.log(
-                            "-1",
-                            "--format=%cd",
-                            "--date=format:%Y-%m-%d %H:%M",
-                            rel_path,
-                        )
-                    except Exception:
-                        pass
+def read_relevant_files(root_path: str, doc_id: str) -> str:
+    """Reads content of files relevant to a specific doc type, with git metadata and line numbers."""
+    # Define relevance criteria per doc_id
+    relevance_filters = {
+        "100": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in [
+                "readme",
+                "architecture",
+                "overview",
+                "main",
+                "app",
+                "index",
+            ]
+        ),  # Architecture
+        "101": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["route", "router", "entry", "main", "app"]
+        ),  # System Router
+        "200": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["business", "domain", "logic", "service", "model"]
+        ),  # Business domain
+        "311": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["route", "controller", "api", "endpoint", "rest"]
+        )
+        or file.endswith((".js", ".ts", ".py", ".java", ".go")),  # REST API
+        "330": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["event", "topic", "message", "queue"]
+        ),  # Events
+        "421": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["model", "schema", "entity", "dto"]
+        ),  # Entity schema
+        "500": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["dependency", "package", "requirements", "pom", "cargo"]
+        ),  # Dependencies
+        "600": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["config", "env", "properties", "settings", "yml", "yaml"]
+        ),  # Config
+        "701": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["auth", "security", "login", "jwt"]
+        ),  # Auth
+        "800": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["log", "monitor", "observability", "metrics"]
+        ),  # Observability
+        "850": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["runbook", "failure", "debug", "restart"]
+        ),  # Runbook
+        "900": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in [
+                "ci",
+                "cd",
+                "pipeline",
+                "workflow",
+                "github",
+                "gitlab",
+                "jenkins",
+            ]
+        ),  # CI/CD
+        "930": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["adr", "decision", "risk", "tradeoff"]
+        ),  # Risks
+        "980": lambda file, root: True,  # RAG: all files, but limited
+    }
 
+    filter_func = relevance_filters.get(doc_id, lambda f, r: False)
+
+    content = []
+    total_chars = 0
+    MAX_TOTAL_CHARS = 500_000  # Per doc type limit
+
+    try:
+        repo = Repo(root_path)
+    except Exception:
+        repo = None
+
+    for root, dirs, files in os.walk(root_path):
+        dirs[:] = [
+            d
+            for d in dirs
+            if d not in IGNORE_DIRS and (not d.startswith(".") or d == ".github")
+        ]
+
+        for file in files:
+            if not filter_func(file, root):
+                continue
+            if total_chars >= MAX_TOTAL_CHARS:
+                content.append("\n--- [TRUNCATED: MAX SIZE REACHED FOR DOC TYPE] ---\n")
+                return "\n".join(content)
+
+            path = os.path.join(root, file)
+            rel_path = os.path.relpath(path, root_path)
+
+            last_modified = "Unknown"
+            if repo:
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        lines = f.readlines()
-
-                        # Add line numbers to content
-                        numbered_lines = []
-                        char_count = 0
-                        limit_reached = False
-
-                        for i, line in enumerate(lines, 1):
-                            # Check per-file limit (approx 5k chars)
-                            if char_count > 5000:
-                                limit_reached = True
-                                break
-
-                            # Format: "120 | content"
-                            formatted_line = f"{i:4d} | {line}"
-                            numbered_lines.append(formatted_line)
-                            char_count += len(formatted_line)
-
-                        file_content = "".join(numbered_lines)
-                        if limit_reached:
-                            file_content += "\n... [File truncated] ...\n"
-
-                        header = f"--- {rel_path} (Last modified: {last_modified}) ---"
-                        content.append(f"{header}\n{file_content}\n")
-                        total_chars += char_count
-
+                    last_modified = repo.git.log(
+                        "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M", rel_path
+                    )
                 except Exception:
                     pass
+
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    numbered_lines = []
+                    char_count = 0
+                    limit_reached = False
+
+                    for i, line in enumerate(lines, 1):
+                        if char_count > 10000:
+                            limit_reached = True
+                            break
+                        formatted_line = f"{i:4d} | {line}"
+                        numbered_lines.append(formatted_line)
+                        char_count += len(formatted_line)
+
+                    file_content = "".join(numbered_lines)
+                    if limit_reached:
+                        file_content += "\n... [File truncated] ...\n"
+
+                    header = f"--- {rel_path} (Last modified: {last_modified}) ---"
+                    content.append(f"{header}\n{file_content}\n")
+                    total_chars += char_count
+
+            except Exception:
+                pass
+
+    return "\n".join(content)
+    # Define relevance criteria per doc_id
+    relevance_filters = {
+        "100": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in [
+                "readme",
+                "architecture",
+                "overview",
+                "main",
+                "app",
+                "index",
+            ]
+        ),  # Architecture
+        "101": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["route", "router", "entry", "main", "app"]
+        ),  # System Router
+        "200": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["business", "domain", "logic", "service", "model"]
+        ),  # Business domain
+        "311": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["route", "controller", "api", "endpoint", "rest"]
+        )
+        or file.endswith((".js", ".ts", ".py", ".java", ".go")),  # REST API
+        "330": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["event", "topic", "message", "queue"]
+        ),  # Events
+        "421": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["model", "schema", "entity", "dto"]
+        ),  # Entity schema
+        "500": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["dependency", "package", "requirements", "pom", "cargo"]
+        ),  # Dependencies
+        "600": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["config", "env", "properties", "settings", "yml", "yaml"]
+        ),  # Config
+        "701": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["auth", "security", "login", "jwt"]
+        ),  # Auth
+        "800": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["log", "monitor", "observability", "metrics"]
+        ),  # Observability
+        "850": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["runbook", "failure", "debug", "restart"]
+        ),  # Runbook
+        "900": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in [
+                "ci",
+                "cd",
+                "pipeline",
+                "workflow",
+                "github",
+                "gitlab",
+                "jenkins",
+            ]
+        ),  # CI/CD
+        "930": lambda file, root: any(
+            keyword in file.lower() or keyword in root.lower()
+            for keyword in ["adr", "decision", "risk", "tradeoff"]
+        ),  # Risks
+        "980": lambda file, root: True,  # RAG: all files, but limited
+    }
+
+    filter_func = relevance_filters.get(doc_id, lambda f, r: False)
+
+    content = []
+    total_chars = 0
+    MAX_TOTAL_CHARS = 500_000  # Per doc type limit
+
+    try:
+        repo = Repo(root_path)
+    except Exception:
+        repo = None
+
+    for root, dirs, files in os.walk(root_path):
+        dirs[:] = [
+            d
+            for d in dirs
+            if d not in IGNORE_DIRS and (not d.startswith(".") or d == ".github")
+        ]
+
+        for file in files:
+            if not filter_func(file, root):
+                continue
+            if total_chars >= MAX_TOTAL_CHARS:
+                content.append("\n--- [TRUNCATED: MAX SIZE REACHED FOR DOC TYPE] ---\n")
+                return "\n".join(content)
+
+            path = os.path.join(root, file)
+            rel_path = os.path.relpath(path, root_path)
+
+            last_modified = "Unknown"
+            if repo:
+                try:
+                    last_modified = repo.git.log(
+                        "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M", rel_path
+                    )
+                except Exception:
+                    pass
+
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    numbered_lines = []
+                    char_count = 0
+                    limit_reached = False
+
+                    for i, line in enumerate(lines, 1):
+                        if char_count > 10000:
+                            limit_reached = True
+                            break
+                        formatted_line = f"{i:4d} | {line}"
+                        numbered_lines.append(formatted_line)
+                        char_count += len(formatted_line)
+
+                    file_content = "".join(numbered_lines)
+                    if limit_reached:
+                        file_content += "\n... [File truncated] ...\n"
+
+                    header = f"--- {rel_path} (Last modified: {last_modified}) ---"
+                    content.append(f"{header}\n{file_content}\n")
+                    total_chars += char_count
+
+            except Exception:
+                pass
 
     return "\n".join(content)

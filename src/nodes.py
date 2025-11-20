@@ -8,7 +8,12 @@ from typing import Dict
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from .state import AgentState
-from .utils import clone_repo, get_directory_structure, read_key_files
+from .utils import (
+    clone_repo,
+    get_directory_structure,
+    read_key_files,
+    read_relevant_files,
+)
 
 logger = logging.getLogger("cerebro")
 
@@ -85,18 +90,20 @@ def plan_documentation(state: AgentState) -> Dict:
     prompt = f"""
     You are a documentation strategist.
     Based on the file structure and key files, decide which of the following documents are relevant for this repository.
-    
+    Detect the tech stack (e.g., React, Angular, Spring Boot, FastAPI, or mixed) and adjust relevance accordingly.
+
     Taxonomy:
     {DOCS_TAXONOMY}
-    
+
     Repo Structure:
     {structure}
-    
+
     Key Content Preview:
     {key_content[:5000]}
-    
+
     Return a JSON object where keys are the doc IDs (e.g., "100", "311") and values are a short reason why it's needed.
     ALWAYS include "100", "200", "900", "980". Include others only if evidence exists (e.g., "311" if routes found, "421" if models found).
+    For mixed stacks, include docs for each detected technology.
     """
 
     messages = [
@@ -136,15 +143,17 @@ async def generate_docs(state: AgentState) -> Dict:
         You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
 
         Follow these strict rules:
-        1. Output PURE Markdown. No YAML frontmatter.
-        2. Start with a top-level # Title.
-        3. Include a metadata table (Repo, Doc Type, Date).
-        4. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}".
-        5. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
-        6. Use project-relative paths for file references, without markdown links.
-        7. Include a "Primary Sources" section at the end.
-        8. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
-        9. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in ```language blocks (e.g., ```python, ```typescript).
+        1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
+        2. No YAML frontmatter.
+        3. Start with a top-level # Title.
+        4. Include a metadata table (Repo, Doc Type, Date).
+        5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}".
+        6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
+        7. Use project-relative paths for file references, without markdown links.
+        8. Include a "Primary Sources" section at the end.
+        9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
+        10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in ```language blocks (e.g., ```python, ```typescript).
+        11. Use admonitions for important notes, warnings, or tips to enhance readability.
         """
 
         user_prompt = f"""
@@ -275,9 +284,105 @@ def write_files(state: AgentState) -> Dict:
             f"- [{doc_id} - {slug.replace('-', ' ').title()}]({filename})\n"
         )
 
-    with open(os.path.join(docs_path, "000-index.md"), "w") as f:
+    with open(os.path.join(docs_path, "index.md"), "w") as f:
         f.write(index_content)
-    final_files.insert(0, "docs/000-index.md")
+    final_files.insert(0, "docs/index.md")
+
+    # Generate mkdocs.yml
+    logger.info("Generating mkdocs.yml...")
+    mkdocs_config = f"""site_name: '{state.get("repo_name")} Documentation'
+site_description: 'Auto-generated documentation for {state.get("repo_name")}'
+site_author: 'Cerebro AI'
+site_url: ''
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: blue
+      accent: blue
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+    - search.suggest
+    - search.highlight
+  icon:
+    repo: fontawesome/brands/github
+
+repo_url: '{state["repo_url"]}'
+repo_name: '{state.get("repo_name")}'
+
+nav:
+  - Home: index.md
+"""
+
+    for doc_id in sorted_ids:
+        slug = names.get(doc_id, "misc-doc")
+        title = f"{doc_id} - {slug.replace('-', ' ').title()}"
+        filename = f"{doc_id}-{slug}.md"
+        mkdocs_config += f"  - '{title}': {filename}\n"
+
+    with open(os.path.join(base_output_dir, "mkdocs.yml"), "w") as f:
+        f.write(mkdocs_config)
 
     logger.info("All files written successfully.")
     return {"final_documentation": "\n".join(final_files)}
+
+
+def create_doc_subgraph(doc_id: str):
+    from langgraph.graph import StateGraph
+
+    def generate_doc(state: AgentState) -> Dict:
+        structure = state["file_listing"][0]
+        relevant_content = read_relevant_files(state["local_path"], doc_id)
+        llm = get_llm()
+        system_prompt = f"""
+        You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
+
+        Follow these strict rules:
+        1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
+        2. No YAML frontmatter.
+        3. Start with a top-level # Title.
+        4. Include a metadata table (Repo, Doc Type, Date).
+        5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}".
+        6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
+        7. Use project-relative paths for file references, without markdown links.
+        8. Include a "Primary Sources" section at the end.
+        9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
+        10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in ```language blocks (e.g., ```python, ```typescript).
+        11. Include admonitions for important notes, warnings, or tips to enhance readability.
+        """
+
+        user_prompt = f"""
+        Generate the content for document ID {doc_id}.
+
+        Reason/Context:
+        Auto-generated for {doc_id}.
+
+        File Structure:
+        {structure}
+
+        Key Files (with timestamps and line numbers):
+        {relevant_content}
+        """
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        try:
+            response = llm.invoke(messages)
+            return {"generated_content": {doc_id: str(response.content)}}
+        except Exception as e:
+            return {
+                "generated_content": {
+                    doc_id: f"# Error\nFailed to generate document: {e}"
+                }
+            }
+
+    subgraph = StateGraph(AgentState)
+    subgraph.add_node("generate", generate_doc)
+    subgraph.set_entry_point("generate")
+    return subgraph.compile()

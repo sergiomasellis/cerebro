@@ -4,7 +4,7 @@ Cerebro is an AI agent built with LangGraph that autonomously generates comprehe
 
 ## Features
 - **Universal Support**: Works with Bitbucket, GitHub, and any Git repository.
-- **Taxonomy-Based Docs**: Generates a structured suite of Markdown files (e.g., `100-architecture-overview.md`, `900-ci-cd-pipeline.md`) rather than a single monolith.
+- **Taxonomy-Based Docs**: Generates a structured suite of MkDocs for Material-compatible Markdown files (e.g., `100-architecture-overview.md`, `900-ci-cd-pipeline.md`) rather than a single monolith.
 - **Adaptive Planning**: intelligently decides which documents are needed based on the repository's content.
 - **Deep Analysis**:
   - **Architecture & Diagrams**: Infers architecture and generates C4/Sequence/ER diagrams using Mermaid.js.
@@ -39,12 +39,36 @@ Cerebro is an AI agent built with LangGraph that autonomously generates comprehe
    ```
 
 ## Output Structure
-The agent creates a `docs/` directory in the repository root (or local cache) containing:
-- `000-index.md`: Main Table of Contents.
-- `100-architecture-overview.md`: High-level system design.
-- `200-business-domain-overview.md`: Domain logic.
-- `...`: Other sections (API, Config, Dependencies) as relevant.
-- `980-rag-indexing-guidelines.md`: Metadata for AI indexing.
+The agent creates a MkDocs-ready directory structure with:
+- `mkdocs.yml`: MkDocs configuration file with Material theme and navigation.
+- `docs/` directory containing:
+  - `index.md`: Main Table of Contents.
+  - `100-architecture-overview.md`: High-level system design.
+  - `200-business-domain-overview.md`: Domain logic.
+  - `...`: Other sections (API, Config, Dependencies) as relevant.
+  - `980-rag-indexing-guidelines.md`: Metadata for AI indexing.
+
+## Testing Generated Docs
+After running the agent, navigate to the generated directory (e.g., `generated-docs/<run_id>/<repo>/`):
+
+1. Install MkDocs (if not already):
+   ```bash
+   uv add mkdocs mkdocs-material
+   ```
+
+2. Serve the docs locally:
+   ```bash
+   cd generated-docs/<run_id>/<repo>/
+   uv run mkdocs serve
+   ```
+
+3. Open your browser to `http://127.0.0.1:8000` to view the generated documentation site.
+
+4. To build static files:
+   ```bash
+   uv run mkdocs build
+   ```
+   This creates a `site/` directory with static HTML files.
 
 ## Tech Stack
 - **LangGraph**: Orchestration.
