@@ -425,6 +425,141 @@ nav:
     return {"final_documentation": "\n".join(final_files)}
 
 
+def create_overview(state: AgentState) -> Dict:
+    """Creates a complete overview page and updates the Documentation Index."""
+    logger.info("Executing create_overview...")
+
+    generated = state["generated_content"]
+    repo_name = state.get("repo_name", "Unknown Repo")
+
+    # Prepare content from all generated docs for LLM
+    all_docs_content = "\n\n".join(
+        [f"## {doc_id}\n{content}" for doc_id, content in generated.items()]
+    )
+
+    llm = get_llm()
+
+    # Generate the overview document
+    overview_prompt = f"""
+    You are a technical writer creating a comprehensive system overview for the repository '{repo_name}'.
+
+    Based on all the generated documentation below, create a complete overview page that synthesizes the entire system.
+
+    Follow these strict rules:
+    1. Output MkDocs Material-compatible Markdown.
+    2. No YAML frontmatter.
+    3. Start with a top-level # System Overview.
+    4. Include a metadata table (Repo, Doc Type, Date, Branch).
+    5. Provide a high-level summary of the entire system based on all documents.
+    6. Include sections for key components, architecture, and how everything fits together.
+    7. Use admonitions for important notes.
+    8. Include a Mermaid diagram showing the overall system architecture if possible.
+    9. End with a "Primary Sources" section listing all the documents used.
+
+    Generated Documentation Content:
+    {all_docs_content[:10000]}  # Truncate if too long
+    """
+
+    messages = [
+        SystemMessage(
+            content="You return only the markdown content for the overview document."
+        ),
+        HumanMessage(content=overview_prompt),
+    ]
+
+    try:
+        response = llm.invoke(messages)
+        overview_content = str(response.content)
+    except Exception as e:
+        logger.error(f"Failed to generate overview: {e}")
+        overview_content = f"# System Overview\n\nError generating overview: {e}"
+
+    # Add overview to generated content
+    updated_generated = dict(generated)
+    updated_generated["000"] = overview_content
+
+    # Now update the index.md with the required sections
+    repo_url_parts = state["repo_url"].rstrip("/").split("/")
+    if len(repo_url_parts) > 1:
+        repo_full_name = f"{repo_url_parts[-2]}/{repo_url_parts[-1]}".replace(
+            ".git", ""
+        )
+    else:
+        repo_full_name = state["repo_name"]
+
+    base_output_dir = os.path.join("generated-docs", state["run_id"], repo_full_name)
+    docs_path = os.path.join(base_output_dir, "docs")
+    index_path = os.path.join(docs_path, "index.md")
+
+    # Read existing index
+    with open(index_path, "r") as f:
+        existing_index = f.read()
+
+    # Generate enhanced index content
+    enhanced_index_prompt = f"""
+    You are enhancing the Documentation Index page for '{repo_name}'.
+
+    Based on all generated documentation, update the index to include these sections at the top:
+
+    - Purpose and Scope
+    - What is this Repo about?
+    - Repo Structure (format as a markdown table with columns: Directory/File | Description)
+    - Repository Architecture Overview
+    - Key Components
+    - Module Descriptions
+
+    Keep the existing document list at the bottom.
+
+    Existing Index:
+    {existing_index}
+
+    Generated Documentation Summary:
+    {all_docs_content[:5000]}
+
+    Return the complete updated index.md content.
+    """
+
+    messages_index = [
+        SystemMessage(
+            content="You return only the updated markdown content for the index."
+        ),
+        HumanMessage(content=enhanced_index_prompt),
+    ]
+
+    try:
+        response_index = llm.invoke(messages_index)
+        updated_index_content = str(response_index.content)
+    except Exception as e:
+        logger.error(f"Failed to update index: {e}")
+        updated_index_content = existing_index  # Fallback to existing
+
+    # Write updated index
+    with open(index_path, "w") as f:
+        f.write(updated_index_content)
+
+    # Write the overview file
+    overview_filename = "000-system-overview.md"
+    overview_path = os.path.join(docs_path, overview_filename)
+    with open(overview_path, "w") as f:
+        f.write(overview_content)
+
+    # Update mkdocs.yml to include the overview
+    mkdocs_path = os.path.join(base_output_dir, "mkdocs.yml")
+    with open(mkdocs_path, "r") as f:
+        mkdocs_content = f.read()
+
+    # Add overview to nav
+    nav_line = "  - Home: index.md\n"
+    overview_nav = f"  - 'System Overview': {overview_filename}\n"
+    updated_mkdocs = mkdocs_content.replace(nav_line, nav_line + overview_nav)
+
+    with open(mkdocs_path, "w") as f:
+        f.write(updated_mkdocs)
+
+    logger.info("Overview created and index updated.")
+    return {"generated_content": updated_generated}
+
+
 def create_doc_subgraph(doc_id: str):
     titles = {
         "100": "Architecture Overview",

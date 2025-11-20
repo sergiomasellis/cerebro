@@ -5,6 +5,7 @@ from .nodes import (
     plan_documentation,
     fix_linkages,
     write_files,
+    create_overview,
     create_doc_subgraph,
 )
 
@@ -19,6 +20,7 @@ def create_docs_agent():
     workflow.add_node("plan_documentation", plan_documentation)
     workflow.add_node("fix_linkages", fix_linkages)
     workflow.add_node("write_files", write_files)
+    workflow.add_node("create_overview", create_overview)
 
     # Create and add subgraph nodes for each doc type
     doc_ids = [
@@ -63,6 +65,7 @@ def create_docs_agent():
     for doc_id in doc_ids:
         workflow.add_edge(f"generate_{doc_id}", "fix_linkages")
     workflow.add_edge("fix_linkages", "write_files")
-    workflow.add_edge("write_files", END)
+    workflow.add_edge("write_files", "create_overview")
+    workflow.add_edge("create_overview", END)
 
     return workflow.compile()
