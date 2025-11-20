@@ -1,4 +1,8 @@
-from typing import List, TypedDict, Dict
+from typing import List, TypedDict, Dict, Annotated
+
+
+def add_docs(left: Dict[str, str], right: Dict[str, str]) -> Dict[str, str]:
+    return {**left, **right}
 
 
 class AgentState(TypedDict):
@@ -12,7 +16,7 @@ class AgentState(TypedDict):
 
     # Generated Content
     # Map of "doc_id" to actual markdown content
-    generated_content: Dict[str, str]
+    generated_content: Annotated[Dict[str, str], add_docs]
 
     # Metadata for the final report
     repo_name: str

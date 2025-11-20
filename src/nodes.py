@@ -331,9 +331,7 @@ nav:
 
 
 def create_doc_subgraph(doc_id: str):
-    from langgraph.graph import StateGraph
-
-    def generate_doc(state: AgentState) -> Dict:
+    def node_func(state: AgentState) -> Dict:
         structure = state["file_listing"][0]
         relevant_content = read_relevant_files(state["local_path"], doc_id)
         llm = get_llm()
@@ -382,7 +380,4 @@ def create_doc_subgraph(doc_id: str):
                 }
             }
 
-    subgraph = StateGraph(AgentState)
-    subgraph.add_node("generate", generate_doc)
-    subgraph.set_entry_point("generate")
-    return subgraph.compile()
+    return node_func
