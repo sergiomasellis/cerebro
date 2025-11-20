@@ -123,11 +123,10 @@ def read_key_files(root_path: str) -> str:
     total_chars = 0
     MAX_TOTAL_CHARS = 1_000_000  # Increased for large repos (~250k tokens)
 
-    # Initialize Repo object for git operations (not currently used)
     try:
-        Repo(root_path)
+        repo = Repo(root_path)
     except Exception:
-        pass
+        repo = None
 
     for root, dirs, files in os.walk(root_path):
         # Filter directories in-place
@@ -146,7 +145,112 @@ def read_key_files(root_path: str) -> str:
             if is_key_file or is_github_workflow:
                 if total_chars >= MAX_TOTAL_CHARS:
                     content.append("\n--- [TRUNCATED: MAX SIZE REACHED] ---\n")
+                    break
+
+                path = os.path.join(root, file)
+                rel_path = os.path.relpath(path, root_path)
+
+                last_modified = "Unknown"
+                if repo:
+                    try:
+                        last_modified = repo.git.log(
+                            "-1",
+                            "--format=%cd",
+                            "--date=format:%Y-%m-%d %H:%M",
+                            rel_path,
+                        )
+                    except Exception:
+                        pass
+
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                        numbered_lines = []
+                        char_count = 0
+                        limit_reached = False
+
+                        for i, line in enumerate(lines, 1):
+                            if char_count > 10000:
+                                limit_reached = True
+                                break
+                            formatted_line = f"{i:4d} | {line}"
+                            numbered_lines.append(formatted_line)
+                            char_count += len(formatted_line)
+
+                        file_content = "".join(numbered_lines)
+                        if limit_reached:
+                            file_content += "\n... [File truncated] ...\n"
+
+                        header = f"--- {rel_path} (Last modified: {last_modified}) ---"
+                        content.append(f"{header}\n{file_content}\n")
+                        total_chars += char_count
+
+                except Exception:
+                    pass
+
     return "\n".join(content)
+
+
+def get_all_files_info(root_path: str) -> str:
+    """Gets information about all files in the repository (except filtered directories)."""
+    content = []
+    total_files = 0
+
+    try:
+        repo = Repo(root_path)
+    except Exception:
+        repo = None
+
+    for root, dirs, files in os.walk(root_path):
+        # Filter directories in-place (same as other functions)
+        dirs[:] = [
+            d
+            for d in dirs
+            if d not in IGNORE_DIRS and (not d.startswith(".") or d == ".github")
+        ]
+
+        for file in files:
+            # Skip hidden files
+            if file.startswith("."):
+                continue
+
+            path = os.path.join(root, file)
+            rel_path = os.path.relpath(path, root_path)
+
+            # Get file size
+            try:
+                file_size = os.path.getsize(path)
+            except Exception:
+                file_size = 0
+
+            # Get last modified date
+            last_modified = "Unknown"
+            if repo:
+                try:
+                    last_modified = repo.git.log(
+                        "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M", rel_path
+                    )
+                except Exception:
+                    pass
+
+            # Get file extension for type
+            _, ext = os.path.splitext(file)
+            file_type = ext[1:] if ext else "no extension"
+
+            content.append(
+                f"- {rel_path} | {file_type} | {file_size} bytes | Modified: {last_modified}"
+            )
+            total_files += 1
+
+            # Limit to prevent massive output
+            if total_files >= 1000:
+                content.append("... [TRUNCATED: Too many files] ...")
+                break
+
+        if total_files >= 1000:
+            break
+
+    return f"Total files: {total_files}\n\n" + "\n".join(content)
 
 
 def read_relevant_files(root_path: str, doc_id: str) -> str:

@@ -14,6 +14,7 @@ from .utils import (
     get_directory_structure,
     read_key_files,
     read_relevant_files,
+    get_all_files_info,
 )
 
 logger = logging.getLogger("cerebro")
@@ -432,6 +433,9 @@ def create_overview(state: AgentState) -> Dict:
     generated = state["generated_content"]
     repo_name = state.get("repo_name", "Unknown Repo")
 
+    # Get complete file information for comprehensive coverage
+    all_files_info = get_all_files_info(state["local_path"])
+
     # Prepare content from all generated docs for LLM
     all_docs_content = "\n\n".join(
         [f"## {doc_id}\n{content}" for doc_id, content in generated.items()]
@@ -443,7 +447,9 @@ def create_overview(state: AgentState) -> Dict:
     overview_prompt = f"""
     You are a technical writer creating a comprehensive system overview for the repository '{repo_name}'.
 
-    Based on all the generated documentation below, create a complete overview page that synthesizes the entire system.
+    Based on all the generated documentation and complete file listing below, create a complete overview page that synthesizes the entire system.
+
+    IMPORTANT: Ensure complete coverage of ALL files in the repository. The goal is file-by-file documentation and understanding.
 
     Follow these strict rules:
     1. Output MkDocs Material-compatible Markdown.
@@ -452,12 +458,16 @@ def create_overview(state: AgentState) -> Dict:
     4. Include a metadata table (Repo, Doc Type, Date, Branch).
     5. Provide a high-level summary of the entire system based on all documents.
     6. Include sections for key components, architecture, and how everything fits together.
-    7. Use admonitions for important notes.
-    8. Include a Mermaid diagram showing the overall system architecture if possible.
-    9. End with a "Primary Sources" section listing all the documents used.
+    7. Include a comprehensive "File Inventory" section that covers ALL files (not just key ones) with their purposes and roles.
+    8. Use admonitions for important notes.
+    9. Include a Mermaid diagram showing the overall system architecture if possible.
+    10. End with a "Primary Sources" section listing all the documents used.
+
+    Complete File Listing (ALL files in repository):
+    {all_files_info}
 
     Generated Documentation Content:
-    {all_docs_content[:10000]}  # Truncate if too long
+    {all_docs_content[:8000]}  # Truncate if too long
     """
 
     messages = [
@@ -499,22 +509,27 @@ def create_overview(state: AgentState) -> Dict:
     enhanced_index_prompt = f"""
     You are enhancing the Documentation Index page for '{repo_name}'.
 
-    Based on all generated documentation, generate ONLY the additional sections to add at the top of the index:
+    Based on all generated documentation and complete file listing, update the index to include these sections at the top:
 
     - Purpose and Scope
     - What is this Repo about?
-    - Repo Structure (format as a markdown table with columns: Directory/File | Description)
+    - Repo Structure (format as a markdown table with columns: Directory/File | Description - ensure ALL directories and files are covered)
     - Repository Architecture Overview
     - Key Components
     - Module Descriptions
+
+    IMPORTANT: Ensure the Repo Structure table includes comprehensive coverage of ALL files and directories in the repository.
 
     Output MkDocs Material-compatible Markdown for these sections only.
     Do not include the document list - that will be added separately.
     Do not include YAML frontmatter.
     Use proper markdown formatting that works with MkDocs Material theme.
 
+    Complete File Listing (ALL files in repository):
+    {all_files_info}
+
     Generated Documentation Summary:
-    {all_docs_content[:5000]}
+    {all_docs_content[:4000]}
 
     Return only the markdown content for the new sections.
     """
