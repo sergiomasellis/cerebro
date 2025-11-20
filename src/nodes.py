@@ -499,7 +499,7 @@ def create_overview(state: AgentState) -> Dict:
     enhanced_index_prompt = f"""
     You are enhancing the Documentation Index page for '{repo_name}'.
 
-    Based on all generated documentation, update the index to include these sections at the top:
+    Based on all generated documentation, generate ONLY the additional sections to add at the top of the index:
 
     - Purpose and Scope
     - What is this Repo about?
@@ -508,15 +508,15 @@ def create_overview(state: AgentState) -> Dict:
     - Key Components
     - Module Descriptions
 
-    Keep the existing document list at the bottom.
-
-    Existing Index:
-    {existing_index}
+    Output MkDocs Material-compatible Markdown for these sections only.
+    Do not include the document list - that will be added separately.
+    Do not include YAML frontmatter.
+    Use proper markdown formatting that works with MkDocs Material theme.
 
     Generated Documentation Summary:
     {all_docs_content[:5000]}
 
-    Return the complete updated index.md content.
+    Return only the markdown content for the new sections.
     """
 
     messages_index = [
@@ -528,7 +528,9 @@ def create_overview(state: AgentState) -> Dict:
 
     try:
         response_index = llm.invoke(messages_index)
-        updated_index_content = str(response_index.content)
+        new_sections = str(response_index.content).strip()
+        # Prepend new sections to existing index
+        updated_index_content = new_sections + "\n\n" + existing_index
     except Exception as e:
         logger.error(f"Failed to update index: {e}")
         updated_index_content = existing_index  # Fallback to existing
