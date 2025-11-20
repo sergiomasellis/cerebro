@@ -15,6 +15,7 @@ from .utils import (
     read_key_files,
     read_relevant_files,
     get_all_files_info,
+    parse_dependencies,
 )
 
 logger = logging.getLogger("cerebro")
@@ -672,30 +673,57 @@ def create_doc_subgraph(doc_id: str):
     def node_func(state: AgentState) -> Dict:
         logger.info(f"   🤖 Generating {doc_id}: {title}...")
         structure = state["file_listing"][0]
-        relevant_content = read_relevant_files(state["local_path"], doc_id)
+
+        if doc_id == "500":
+            # Special handling for dependencies - use comprehensive parsing
+            relevant_content = parse_dependencies(state["local_path"])
+        else:
+            relevant_content = read_relevant_files(state["local_path"], doc_id)
+
         latest_date = extract_latest_date(relevant_content)
         llm = get_llm()
-        system_prompt = f"""
-        You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
+        if doc_id == "500":
+            system_prompt = f"""
+            You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
 
-        Follow these strict rules:
-        1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
-        2. No YAML frontmatter.
-        3. Start with a top-level # {title}.
-        4. Include a metadata table (Repo, Doc Type, Date).
-        5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}" and use the Date: {latest_date}.
-        6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
-        7. Use project-relative paths for file references, without markdown links.
-        8. Include a "Primary Sources" section at the end. Do not use footnotes.
-        9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
-        10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in MkDocs Material code blocks with advanced features:
-            - Use syntax highlighting: ```language
-            - Add descriptive titles for file snippets: ```language title="Descriptive title (filename.ext)"
-            - Add line numbers when showing multi-line code: ```language linenums="1"
-            - Highlight important lines: ```language hl_lines="2-4" (adjust line numbers based on context)
-            - Use annotations for explanations: add (1) in comments and explain below the block
-        11. Include admonitions for important notes, warnings, or tips to enhance readability.
-        """
+            This is a DEPENDENCY ANALYSIS document. Based on the parsed dependency data provided, create a comprehensive overview of all dependencies used in the project.
+
+            Follow these strict rules:
+            1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
+            2. No YAML frontmatter.
+            3. Start with a top-level # {title}.
+            4. Include a metadata table (Repo, Doc Type, Date, Branch).
+            5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}" and use the Date: {latest_date}.
+            6. Create a comprehensive "Dependency Inventory" section with ALL unique dependencies, their versions, and what they're used for.
+            7. Group dependencies by type (Python, JavaScript, Java, etc.) with clear headers.
+            8. For each dependency, include: name, version constraint, source file, and a brief description of its purpose/use case.
+            9. Include dependency statistics (total count, by type, etc.).
+            10. Add sections for "Critical Dependencies", "Development Dependencies", and "Runtime Dependencies" if applicable.
+            11. Include admonitions for important notes about dependency management, security considerations, or version conflicts.
+            12. End with a "Primary Sources" section listing all dependency files analyzed.
+            """
+        else:
+            system_prompt = f"""
+            You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
+
+            Follow these strict rules:
+            1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
+            2. No YAML frontmatter.
+            3. Start with a top-level # {title}.
+            4. Include a metadata table (Repo, Doc Type, Date).
+            5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}" and use the Date: {latest_date}.
+            6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
+            7. Use project-relative paths for file references, without markdown links.
+            8. Include a "Primary Sources" section at the end. Do not use footnotes.
+            9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
+            10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in MkDocs Material code blocks with advanced features:
+                - Use syntax highlighting: ```language
+                - Add descriptive titles for file snippets: ```language title="Descriptive title (filename.ext)"
+                - Add line numbers when showing multi-line code: ```language linenums="1"
+                - Highlight important lines: ```language hl_lines="2-4" (adjust line numbers based on context)
+                - Use annotations for explanations: add (1) in comments and explain below the block
+            11. Include admonitions for important notes, warnings, or tips to enhance readability.
+            """
 
         user_prompt = f"""
         Generate the content for document ID {doc_id}.

@@ -191,6 +191,257 @@ def read_key_files(root_path: str) -> str:
     return "\n".join(content)
 
 
+def parse_dependencies(root_path: str) -> str:
+    """Parse dependency files and extract comprehensive dependency information."""
+    import json
+    import re
+
+    dependencies = {}
+    dependency_files = []
+
+    # Find all dependency files
+    for root, dirs, files in os.walk(root_path):
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
+
+        for file in files:
+            if file in [
+                "requirements.txt",
+                "pyproject.toml",
+                "package.json",
+                "package-lock.json",
+                "yarn.lock",
+                "Pipfile",
+                "Pipfile.lock",
+                "Cargo.toml",
+                "Cargo.lock",
+                "pom.xml",
+                "build.gradle",
+                "build.gradle.kts",
+                "go.mod",
+                "go.sum",
+            ]:
+                dependency_files.append(os.path.join(root, file))
+
+    content_lines = []
+
+    for dep_file in dependency_files:
+        rel_path = os.path.relpath(dep_file, root_path)
+        filename = os.path.basename(dep_file)
+
+        try:
+            with open(dep_file, "r", encoding="utf-8") as f:
+                file_content = f.read()
+
+            content_lines.append(f"## {filename} ({rel_path})")
+            content_lines.append("")
+
+            if filename == "requirements.txt":
+                # Parse requirements.txt
+                lines = file_content.strip().split("\n")
+                for line in lines:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        # Parse package==version or package>=version, etc.
+                        match = re.match(r"^([a-zA-Z0-9\-_.]+)([><=~!]+.+)?", line)
+                        if match:
+                            package = match.group(1)
+                            version = match.group(2) if match.group(2) else "latest"
+                            dependencies[package] = {
+                                "version": version,
+                                "source": "requirements.txt",
+                                "type": "python",
+                            }
+                            content_lines.append(f"- **{package}** {version}")
+
+            elif filename == "pyproject.toml":
+                # Parse pyproject.toml
+                try:
+                    import tomllib
+
+                    data = tomllib.loads(file_content)
+                except ImportError:
+                    # Fallback for older Python versions
+                    try:
+                        import tomli
+
+                        data = tomli.loads(file_content)
+                    except ImportError:
+                        content_lines.append(
+                            "Could not parse TOML file (missing tomli/tomllib)"
+                        )
+                        continue
+
+                # Extract dependencies from various sections
+                dep_sections = [
+                    "dependencies",
+                    "dev-dependencies",
+                    "optional-dependencies",
+                ]
+                for section in dep_sections:
+                    if "tool" in data and "poetry" in data["tool"]:
+                        poetry_deps = data["tool"]["poetry"].get(section, {})
+                        for pkg, version in poetry_deps.items():
+                            dependencies[pkg] = {
+                                "version": str(version),
+                                "source": "pyproject.toml (poetry)",
+                                "type": "python",
+                            }
+                            content_lines.append(f"- **{pkg}** {version}")
+
+                    if "project" in data:
+                        project_deps = data["project"].get(section, [])
+                        for dep in project_deps:
+                            if isinstance(dep, str):
+                                match = re.match(
+                                    r"^([a-zA-Z0-9\-_.]+)([><=~!]+.+)?", dep
+                                )
+                                if match:
+                                    pkg = match.group(1)
+                                    version = (
+                                        match.group(2) if match.group(2) else "latest"
+                                    )
+                                    dependencies[pkg] = {
+                                        "version": version,
+                                        "source": "pyproject.toml (PEP 621)",
+                                        "type": "python",
+                                    }
+                                    content_lines.append(f"- **{pkg}** {version}")
+
+            elif filename == "package.json":
+                # Parse package.json
+                try:
+                    data = json.loads(file_content)
+                    dep_types = [
+                        "dependencies",
+                        "devDependencies",
+                        "peerDependencies",
+                        "optionalDependencies",
+                    ]
+
+                    for dep_type in dep_types:
+                        if dep_type in data:
+                            for pkg, version in data[dep_type].items():
+                                dependencies[pkg] = {
+                                    "version": version,
+                                    "source": f"package.json ({dep_type})",
+                                    "type": "javascript",
+                                }
+                                content_lines.append(f"- **{pkg}** {version}")
+                except json.JSONDecodeError:
+                    content_lines.append("Could not parse JSON file")
+
+            elif filename == "Cargo.toml":
+                # Parse Cargo.toml
+                try:
+                    import tomllib
+
+                    data = tomllib.loads(file_content)
+                except ImportError:
+                    try:
+                        import tomli
+
+                        data = tomli.loads(file_content)
+                    except ImportError:
+                        content_lines.append(
+                            "Could not parse TOML file (missing tomli/tomllib)"
+                        )
+                        continue
+
+                if "dependencies" in data:
+                    for pkg, version_info in data["dependencies"].items():
+                        if isinstance(version_info, str):
+                            version = version_info
+                        elif isinstance(version_info, dict):
+                            version = version_info.get("version", "latest")
+                        else:
+                            version = str(version_info)
+
+                        dependencies[pkg] = {
+                            "version": version,
+                            "source": "Cargo.toml",
+                            "type": "rust",
+                        }
+                        content_lines.append(f"- **{pkg}** {version}")
+
+            elif filename == "go.mod":
+                # Parse go.mod
+                lines = file_content.strip().split("\n")
+                for line in lines:
+                    if line.startswith("require ") or line.startswith("\t"):
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            pkg = parts[0]
+                            version = parts[1] if len(parts) > 1 else "latest"
+                            dependencies[pkg] = {
+                                "version": version,
+                                "source": "go.mod",
+                                "type": "go",
+                            }
+                            content_lines.append(f"- **{pkg}** {version}")
+
+            elif filename == "pom.xml":
+                # Basic XML parsing for Maven
+                # Look for dependency blocks
+                import xml.etree.ElementTree as ET
+
+                try:
+                    root = ET.fromstring(file_content)
+                    ns = {"mvn": "http://maven.apache.org/POM/4.0.0"}
+                    for dep in root.findall(".//mvn:dependency", ns):
+                        group_id = dep.find("mvn:groupId", ns)
+                        artifact_id = dep.find("mvn:artifactId", ns)
+                        version_elem = dep.find("mvn:version", ns)
+
+                        if group_id is not None and artifact_id is not None:
+                            pkg = f"{group_id.text}:{artifact_id.text}"
+                            version = (
+                                version_elem.text
+                                if version_elem is not None
+                                else "latest"
+                            )
+                            dependencies[pkg] = {
+                                "version": version,
+                                "source": "pom.xml",
+                                "type": "java",
+                            }
+                            content_lines.append(f"- **{pkg}** {version}")
+                except ET.ParseError:
+                    content_lines.append("Could not parse XML file")
+
+            content_lines.append("")
+
+        except Exception as e:
+            content_lines.append(f"Error reading {filename}: {e}")
+            content_lines.append("")
+
+    # Create summary section
+    if dependencies:
+        content_lines.insert(0, "## Dependency Summary")
+        content_lines.insert(1, "")
+        content_lines.insert(2, f"Total unique dependencies found: {len(dependencies)}")
+        content_lines.insert(3, "")
+
+        # Group by type
+        by_type = {}
+        for pkg, info in dependencies.items():
+            dep_type = info["type"]
+            if dep_type not in by_type:
+                by_type[dep_type] = []
+            by_type[dep_type].append((pkg, info))
+
+        for dep_type, deps in by_type.items():
+            content_lines.insert(
+                4, f"### {dep_type.title()} Dependencies ({len(deps)})"
+            )
+            for pkg, info in sorted(deps):
+                content_lines.insert(
+                    5, f"- **{pkg}** {info['version']} - {info['source']}"
+                )
+            content_lines.insert(6, "")
+
+    return "\n".join(content_lines)
+
+
 def get_all_files_info(root_path: str) -> str:
     """Gets information about all files in the repository (except filtered directories)."""
     content = []
