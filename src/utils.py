@@ -62,6 +62,8 @@ IGNORE_DIRS = {
 FILE_SIZE_HARD_CAP = 2 * 1024 * 1024  # 2MB hard cap for snippetable files
 HASH_SIZE_CAP = 512 * 1024  # Only hash files up to 512KB to avoid large reads
 DEFAULT_MAX_FILES = 150_000  # Guardrail for extremely large repos
+DEFAULT_CHUNK_SIZE = 128 * 1024  # 128KB chunks for oversize files
+DEFAULT_MAX_CHUNKS_PER_FILE = 3  # Limit per file to avoid runaway reads
 
 
 def _safe_stat(path: str) -> tuple[int, float]:
@@ -87,8 +89,12 @@ def _safe_hash(path: str, size: int) -> str | None:
 
 
 def _is_text_candidate(path: str, size: int) -> bool:
-    if size == 0 or size > FILE_SIZE_HARD_CAP:
+    if size == 0:
         return False
+    # For very large files, still consider text, but chunk separately downstream
+    if size > FILE_SIZE_HARD_CAP:
+        mime, _ = mimetypes.guess_type(path)
+        return bool(mime and mime.startswith("text"))
     mime, _ = mimetypes.guess_type(path)
     if mime and not mime.startswith("text"):
         return False
@@ -150,6 +156,10 @@ def build_file_index(root_path: str, max_files: int = DEFAULT_MAX_FILES):
             is_text = _is_text_candidate(path, size)
             sha256 = _safe_hash(path, size) if is_text else None
 
+            oversized = size > FILE_SIZE_HARD_CAP
+            chunk_size = DEFAULT_CHUNK_SIZE
+            chunk_count = (size // chunk_size) + (1 if size % chunk_size else 0) if oversized else 0
+
             record = {
                 "path": rel_path,
                 "size": size,
@@ -157,6 +167,8 @@ def build_file_index(root_path: str, max_files: int = DEFAULT_MAX_FILES):
                 "ext": ext,
                 "is_text": is_text,
                 "sha256": sha256,
+                "oversized": oversized,
+                "chunk_count": chunk_count,
             }
             files.append(record)
             total_files += 1
@@ -833,6 +845,9 @@ def read_relevant_files(
     candidate_paths: Optional[list[str]] = None,
     hash_index: Optional[dict[str, list[str]]] = None,
     max_total_chars: int = 500_000,
+    size_map: Optional[dict[str, int]] = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    max_chunks_per_file: int = DEFAULT_MAX_CHUNKS_PER_FILE,
 ) -> str:
     """
     Reads content of files relevant to a specific doc type with git metadata and line numbers.
@@ -883,11 +898,13 @@ def read_relevant_files(
             if sha:
                 seen_hashes.add(sha)
 
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-        except (UnicodeDecodeError, OSError):
-            continue
+        # Determine size for chunking decisions
+        file_size = size_map.get(rel_path) if size_map else None
+        if file_size is None:
+            try:
+                file_size = os.path.getsize(path)
+            except OSError:
+                file_size = 0
 
         last_modified = "Unknown"
         if repo:
@@ -898,24 +915,66 @@ def read_relevant_files(
             except Exception:
                 pass
 
-        numbered_lines = []
-        char_count = 0
-        limit_reached = False
+        # Choose reading strategy
+        try:
+            if file_size > chunk_size:
+                # Chunked read
+                chunks_read = 0
+                offset = 0
+                while chunks_read < max_chunks_per_file and total_chars < max_total_chars:
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                            f.seek(offset)
+                            data = f.read(chunk_size)
+                    except (UnicodeDecodeError, OSError):
+                        break
+                    if not data:
+                        break
+                    lines = data.splitlines()
+                    numbered_lines = []
+                    char_count = 0
+                    for i, line in enumerate(lines, 1):
+                        formatted_line = f"{i:4d} | {line}\n"
+                        numbered_lines.append(formatted_line)
+                        char_count += len(formatted_line)
+                        if char_count + total_chars >= max_total_chars:
+                            break
 
-        for i, line in enumerate(lines, 1):
-            if char_count > 10000:
-                limit_reached = True
-                break
-            formatted_line = f"{i:4d} | {line}"
-            numbered_lines.append(formatted_line)
-            char_count += len(formatted_line)
+                    header = (
+                        f"--- {rel_path} [chunk {chunks_read + 1} @ bytes {offset}-{offset + len(data)}] "
+                        f"(Last modified: {last_modified}) ---"
+                    )
+                    content.append(f"{header}\n{''.join(numbered_lines)}\n")
+                    total_chars += char_count
+                    chunks_read += 1
+                    offset += chunk_size
+                    if total_chars >= max_total_chars:
+                        break
+            else:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+        except (UnicodeDecodeError, OSError):
+            continue
 
-        file_content = "".join(numbered_lines)
-        if limit_reached:
-            file_content += "\n... [File truncated] ...\n"
+        if file_size <= chunk_size:
+            numbered_lines = []
+            char_count = 0
+            limit_reached = False
 
-        header = f"--- {rel_path} (Last modified: {last_modified}) ---"
-        content.append(f"{header}\n{file_content}\n")
-        total_chars += char_count
+            for i, line in enumerate(lines, 1):
+                if char_count > 10000:
+                    limit_reached = True
+                    break
+                formatted_line = f"{i:4d} | {line}"
+                numbered_lines.append(formatted_line)
+                char_count += len(formatted_line)
+
+            file_content = "".join(numbered_lines)
+            if limit_reached:
+                file_content += "\n... [File truncated] ...\n"
+
+            header = f"--- {rel_path} (Last modified: {last_modified}) ---"
+            content.append(f"{header}\n{file_content}\n")
+            total_chars += char_count
 
     return "\n".join(content)

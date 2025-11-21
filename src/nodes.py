@@ -251,6 +251,7 @@ async def generate_docs(state: AgentState) -> Dict:
                 doc_id,
                 candidate_paths=candidate_paths,
                 hash_index=hash_index,
+                size_map=file_sizes,
                 max_total_chars=300_000 if doc_id == "980" else 200_000,
             )
         latest_date = extract_latest_date(relevant_content)
@@ -262,11 +263,11 @@ async def generate_docs(state: AgentState) -> Dict:
         1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
         2. No YAML frontmatter.
         3. Start with a top-level # {title}.
-        4. Include a metadata table (Repo, Doc Type, Date) and set Date to {latest_date}.
+        4. Include a metadata table (Repo, Doc Type, Date) and set Date to {latest_date}. Doc Type MUST be the descriptive title "{title}" (not the numeric id).
         5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}".
         6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
         7. Use project-relative paths for file references, without markdown links.
-        8. Include a "Primary Sources" section at the end. Do not use footnotes.
+        8. Include a "Primary Sources" section at the end using markdown footnotes (e.g., [^1]: path/to/file.ext).
         9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
         10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in ```language blocks (e.g., ```python title="Descriptive title (filename.ext)", ```typescript).
         11. Include admonitions for important notes, warnings, or tips to enhance readability.
@@ -585,7 +586,7 @@ def create_overview(state: AgentState) -> Dict:
     7. Include a comprehensive "File Inventory" section that covers ALL files (not just key ones) with their purposes and roles.
     8. Use admonitions for important notes.
     9. Include a Mermaid diagram showing the overall system architecture if possible.
-    10. End with a "Primary Sources" section listing all the documents used.
+    10. End with a "Primary Sources" section using markdown footnotes (e.g., [^1]: docs/xyz.md) listing all documents used.
 
     Complete File Listing (ALL files in repository):
     {all_files_info}

@@ -14,6 +14,8 @@ class FileRecord(TypedDict):
     ext: str
     is_text: bool
     sha256: str | None
+    oversized: bool
+    chunk_count: int
 
 
 class AgentState(TypedDict, total=False):
