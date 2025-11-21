@@ -256,6 +256,20 @@ async def generate_docs(state: AgentState) -> Dict:
             )
         latest_date = extract_latest_date(relevant_content)
 
+        extra_sections = ""
+        if doc_id == "100":
+            extra_sections = """
+            Include a subsection "Agent Workflow & Large Files" that explains how the documentation agent works for any repo:
+            - Repo scan and file indexing (single pass, ignore vendor dirs).
+            - Candidate selection by doc type.
+            - Chunked reading for oversized files (128KB chunks, limited per file), dedup by sha256.
+            - Concurrency controls on LLM calls.
+            If prompt/config files exist (e.g., AGENTS.md, example.prompt.md, README), reference them; otherwise describe the generic workflow."""
+        elif doc_id == "980":
+            extra_sections = """
+            Add a section "Agent Prompts & Pipeline" that, if available, cites repo prompt/config files (e.g., example.prompt.md, AGENTS.md) and otherwise summarizes the generic workflow for planning docs, chunking large files, and writing outputs.
+            Add a "Large File Handling" subsection summarizing chunk sizes, chunk limits, dedup, and sampling rules."""
+
         system_prompt = f"""
         You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
 
@@ -267,10 +281,12 @@ async def generate_docs(state: AgentState) -> Dict:
         5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}".
         6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
         7. Use project-relative paths for file references, without markdown links.
-        8. Include a "Primary Sources" section at the end using markdown footnotes (e.g., [^1]: path/to/file.ext).
+        8. Include a "Primary Sources" section at the end using markdown footnotes (e.g., [^1]: path/to/file.ext). Every footnote must be referenced at least once (e.g., add a line `Sources: [^1] [^2]` before the definitions). If no sources, omit the section.
         9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
         10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in ```language blocks (e.g., ```python title="Descriptive title (filename.ext)", ```typescript).
         11. Include admonitions for important notes, warnings, or tips to enhance readability.
+        12. MERMAID RULES: only flowchart syntax; keep labels alphanumeric/spaces; no special chars (<, >, :, |); each edge must end at a valid node; prefer `A[Label] --> B[Label]`; avoid indentation; use consistent arrow style.
+        {extra_sections}
         """
 
         user_prompt = f"""
@@ -585,8 +601,9 @@ def create_overview(state: AgentState) -> Dict:
     6. Include sections for key components, architecture, and how everything fits together.
     7. Include a comprehensive "File Inventory" section that covers ALL files (not just key ones) with their purposes and roles.
     8. Use admonitions for important notes.
-    9. Include a Mermaid diagram showing the overall system architecture if possible.
-    10. End with a "Primary Sources" section using markdown footnotes (e.g., [^1]: docs/xyz.md) listing all documents used.
+    9. Include a Mermaid diagram showing the overall system architecture if possible. MERMAID RULES: use flowchart syntax only; consistent arrow style; no special characters in labels (<, >, :, |); ensure every edge has a valid target; keep labels short and alphanumeric with spaces; prefer `A[Label] --> B[Label]`.
+    10. Include a brief "Agent Workflow & Large Files" note describing repo scan, candidate selection, chunked reads for oversized files, and how prompts (e.g., AGENTS.md/example.prompt.md) drive documentation generation.
+    10. End with a "Primary Sources" section using markdown footnotes (e.g., [^1]: docs/xyz.md) listing all documents used. Every footnote must be referenced at least once (e.g., add `Sources: [^1] [^2]` before the definitions). If no sources, omit the section.
 
     Complete File Listing (ALL files in repository):
     {all_files_info}
