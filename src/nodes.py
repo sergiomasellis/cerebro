@@ -11,11 +11,10 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from .state import AgentState
 from .utils import (
     clone_repo,
-    get_directory_structure,
-    read_key_files,
+    build_file_index,
     read_relevant_files,
-    get_all_files_info,
     parse_dependencies,
+    select_doc_candidates,
 )
 
 logger = logging.getLogger("cerebro")
@@ -52,6 +51,10 @@ DOCS_TAXONOMY = """
 500 - Key dependencies (Internal services, 3rd party APIs)
 600 - Config & environments (Files, vars, secrets management)
 701 - Authentication model (Mechanisms, permissions)
+720 - Testing & quality (Test strategy, coverage gates, tooling)
+740 - Security posture (AuthZ hooks, scanners, secrets handling)
+760 - Performance & scalability (Caching, concurrency, throttling)
+780 - Data & migrations (Schema evolution, migrations, data jobs)
 800 - Observability overview (Logs, metrics, health)
 850 - Runbook operations (Failure modes, debugging, restart)
 900 - CI/CD pipeline (Build, test, deploy)
@@ -61,7 +64,7 @@ DOCS_TAXONOMY = """
 
 
 def get_llm():
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o")
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4.1")
     return ChatOpenAI(model=model_name, temperature=0.2)
 
 
@@ -84,8 +87,11 @@ def clone_node(state: AgentState) -> Dict:
         )
         path = os.getcwd()
 
-    logger.info("   📁 Analyzing repository structure...")
-    structure = get_directory_structure(path)
+    logger.info("   📁 Indexing repository (single pass)...")
+    index_result = build_file_index(path)
+    structure = index_result["structure"]
+    file_index = index_result["files"]
+    hash_index = index_result["hash_index"]
     repo_name = url.split("/")[-1].replace(".git", "")
     run_id = str(uuid.uuid4())
 
@@ -107,6 +113,9 @@ def clone_node(state: AgentState) -> Dict:
     return {
         "local_path": path,
         "file_listing": [structure],
+        "file_index": file_index,
+        "hash_index": hash_index,
+        "doc_candidates": select_doc_candidates(file_index),
         "repo_name": repo_name,
         "last_commit": last_commit,
         "branch_name": branch_name,
@@ -122,33 +131,37 @@ def plan_documentation(state: AgentState) -> Dict:
     )
 
     structure = state["file_listing"][0]
-    logger.info("   📁 Reading key files...")
-    key_content = read_key_files(state["local_path"])
+    doc_candidates = state.get("doc_candidates", {})
 
-    logger.info("   🤖 Consulting AI to plan documentation strategy...")
+    mandatory = {
+        "100": "Always generate architecture overview",
+        "200": "Always generate business/domain overview",
+        "900": "Always generate CI/CD overview",
+    }
+    plan: Dict[str, str] = dict(mandatory)
+
+    candidate_summary = {}
+    for doc_id, files in doc_candidates.items():
+        if doc_id in mandatory:
+            continue
+        if files:
+            plan[doc_id] = f"Found {len(files)} relevant files"
+        candidate_summary[doc_id] = {"count": len(files), "examples": files[:5]}
+
     llm = get_llm()
-    prompt = f"""
-    You are a documentation strategist.
-    Based on the file structure and key files, decide which of the following documents are relevant for this repository.
-    Detect the tech stack (e.g., React, Angular, Spring Boot, FastAPI, or mixed) and adjust relevance accordingly.
-
-    Taxonomy:
-    {DOCS_TAXONOMY}
-
-    Repo Structure:
-    {structure}
-
-    Key Content Preview:
-    {key_content[:5000]}
-
-    Return a JSON object where keys are the doc IDs (e.g., "100", "311") and values are a short reason why it's needed.
-    ALWAYS include "100", "200", "900", "980". Include others only if evidence exists (e.g., "311" if routes found, "421" if models found).
-    For mixed stacks, include docs for each detected technology.
-    """
+    prompt = {
+        "taxonomy": DOCS_TAXONOMY,
+        "structure": structure[:4000],
+        "candidates": candidate_summary,
+        "instruction": (
+            'Return JSON mapping doc_id -> reason. Always include "100","200","900","980". '
+            "Keep only doc_ids with evidence (count > 0 or critical)."
+        ),
+    }
 
     messages = [
-        SystemMessage(content="You return only JSON."),
-        HumanMessage(content=prompt),
+        SystemMessage(content="You return only compact JSON with reasons."),
+        HumanMessage(content=json.dumps(prompt)),
     ]
 
     try:
@@ -157,13 +170,13 @@ def plan_documentation(state: AgentState) -> Dict:
         content = (
             str(response.content).strip().replace("```json", "").replace("```", "")
         )
-        plan = json.loads(content)
+        refined = json.loads(content)
+        refined.update({k: v for k, v in plan.items() if k not in refined})
+        plan = refined
         logger.info("   ✅ AI planning completed")
     except Exception as e:
-        logger.error(f"   ❌ AI planning failed, falling back to defaults: {e}")
-        plan = {"100": "Default", "200": "Default", "900": "Default", "980": "Default"}
+        logger.error(f"   ❌ AI planning failed, using heuristic plan: {e}")
 
-    # Remove "000" from plan since it's generated separately at the end
     if "000" in plan:
         del plan["000"]
 
@@ -185,13 +198,15 @@ async def generate_docs(state: AgentState) -> Dict:
         f"   📝 Starting parallel generation of {planned_count} documentation sections..."
     )
 
-    # Pre-load context once to avoid I/O thrashing in parallel threads
     path = state["local_path"]
     structure = state["file_listing"][0]
-    logger.info("   📁 Pre-loading repository context...")
-    key_content = read_key_files(path)  # Read ONCE
-
+    doc_candidates = state.get("doc_candidates", {})
+    hash_index = state.get("hash_index", {})
     llm = get_llm()
+    semaphore = asyncio.Semaphore(int(os.getenv("CONCURRENT_DOCS", "4")))
+    file_sizes = {rec["path"]: rec.get("size", 0) for rec in state.get("file_index", [])}
+    max_default_candidates = int(os.getenv("MAX_DOC_CANDIDATES", "120"))
+    max_rag_candidates = int(os.getenv("MAX_RAG_CANDIDATES", "200"))
 
     async def generate_single_doc(doc_id: str, reason: str):
         titles = {
@@ -204,6 +219,10 @@ async def generate_docs(state: AgentState) -> Dict:
             "500": "Key Dependencies",
             "600": "Config and Environments",
             "701": "Authentication Model",
+            "720": "Testing & Quality",
+            "740": "Security Posture",
+            "760": "Performance & Scalability",
+            "780": "Data & Migrations",
             "800": "Observability Overview",
             "850": "Runbook Operations",
             "900": "CI/CD Pipeline",
@@ -213,6 +232,28 @@ async def generate_docs(state: AgentState) -> Dict:
         title = titles.get(doc_id, "Document")
 
         logger.info(f"   🤖 Generating {doc_id}: {title}...")
+        all_candidates = doc_candidates.get(doc_id, [])
+        max_candidates = max_rag_candidates if doc_id == "980" else max_default_candidates
+        if len(all_candidates) > max_candidates:
+            candidate_paths = sorted(
+                all_candidates, key=lambda p: file_sizes.get(p, 0)
+            )[:max_candidates]
+            logger.info(
+                f"   📑 Sampling {len(candidate_paths)} of {len(all_candidates)} candidates for {doc_id}"
+            )
+        else:
+            candidate_paths = all_candidates
+        if doc_id == "500":
+            relevant_content = parse_dependencies(path, state.get("file_index"))
+        else:
+            relevant_content = read_relevant_files(
+                path,
+                doc_id,
+                candidate_paths=candidate_paths,
+                hash_index=hash_index,
+                max_total_chars=300_000 if doc_id == "980" else 200_000,
+            )
+        latest_date = extract_latest_date(relevant_content)
 
         system_prompt = f"""
         You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
@@ -221,7 +262,7 @@ async def generate_docs(state: AgentState) -> Dict:
         1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
         2. No YAML frontmatter.
         3. Start with a top-level # {title}.
-        4. Include a metadata table (Repo, Doc Type, Date).
+        4. Include a metadata table (Repo, Doc Type, Date) and set Date to {latest_date}.
         5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}".
         6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
         7. Use project-relative paths for file references, without markdown links.
@@ -240,8 +281,8 @@ async def generate_docs(state: AgentState) -> Dict:
         File Structure:
         {structure}
 
-        Key Files (with timestamps and line numbers):
-        {key_content}
+        Relevant Files (with timestamps and line numbers):
+        {relevant_content}
         """
 
         messages = [
@@ -250,8 +291,8 @@ async def generate_docs(state: AgentState) -> Dict:
         ]
 
         try:
-            # Use ainvoke for async LLM call
-            response = await llm.ainvoke(messages)
+            async with semaphore:
+                response = await llm.ainvoke(messages)
             logger.info(f"   ✅ Completed {doc_id}: {title}")
             return doc_id, str(response.content)
         except Exception as e:
@@ -344,6 +385,10 @@ def write_files(state: AgentState) -> Dict:
         "500": "key-dependencies",
         "600": "config-and-environments",
         "701": "authentication-model",
+        "720": "testing-and-quality",
+        "740": "security-posture",
+        "760": "performance-and-scalability",
+        "780": "data-and-migrations",
         "800": "observability-overview",
         "850": "runbook-operations",
         "900": "ci-cd-pipeline",
@@ -360,6 +405,10 @@ def write_files(state: AgentState) -> Dict:
         "500": "Key Dependencies",
         "600": "Config and Environments",
         "701": "Authentication Model",
+        "720": "Testing & Quality",
+        "740": "Security Posture",
+        "760": "Performance & Scalability",
+        "780": "Data & Migrations",
         "800": "Observability Overview",
         "850": "Runbook Operations",
         "900": "CI/CD Pipeline",
@@ -495,9 +544,20 @@ def create_overview(state: AgentState) -> Dict:
     generated = state["generated_content"]
     repo_name = state.get("repo_name", "Unknown Repo")
 
-    # Get complete file information for comprehensive coverage
-    logger.info("   📁 Collecting complete file inventory...")
-    all_files_info = get_all_files_info(state["local_path"])
+    logger.info("   📁 Collecting indexed file inventory...")
+    file_index = state.get("file_index", [])
+    inventory_lines = []
+    max_inventory = 2000
+    for i, record in enumerate(file_index):
+        if i >= max_inventory:
+            inventory_lines.append("... [TRUNCATED: inventory shortened for brevity] ...")
+            break
+        inventory_lines.append(
+            f"- {record['path']} | {record.get('ext') or 'noext'} | {record.get('size', 0)} bytes | Modified: {record.get('mtime', 'Unknown')}"
+        )
+    all_files_info = f"Total files indexed: {len(file_index)}\n\n" + "\n".join(
+        inventory_lines
+    )
 
     # Prepare content from all generated docs for LLM
     all_docs_content = "\n\n".join(
@@ -649,110 +709,3 @@ def create_overview(state: AgentState) -> Dict:
     logger.info("🔄 STAGE 7/7: Documentation Generation Complete")
     logger.info("   🎉 All documentation has been successfully generated!")
     return {"generated_content": updated_generated}
-
-
-def create_doc_subgraph(doc_id: str):
-    titles = {
-        "100": "Architecture Overview",
-        "101": "System Router",
-        "200": "Business Domain Overview",
-        "311": "REST API Endpoints",
-        "330": "Event Topics",
-        "421": "Main Entity Schema",
-        "500": "Key Dependencies",
-        "600": "Config and Environments",
-        "701": "Authentication Model",
-        "800": "Observability Overview",
-        "850": "Runbook Operations",
-        "900": "CI/CD Pipeline",
-        "930": "Risks and Decisions",
-        "980": "RAG Indexing Guidelines",
-    }
-    title = titles.get(doc_id, "Document")
-
-    def node_func(state: AgentState) -> Dict:
-        logger.info(f"   🤖 Generating {doc_id}: {title}...")
-        structure = state["file_listing"][0]
-
-        if doc_id == "500":
-            # Special handling for dependencies - use comprehensive parsing
-            relevant_content = parse_dependencies(state["local_path"])
-        else:
-            relevant_content = read_relevant_files(state["local_path"], doc_id)
-
-        latest_date = extract_latest_date(relevant_content)
-        llm = get_llm()
-        if doc_id == "500":
-            system_prompt = f"""
-            You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
-
-            This is a DEPENDENCY ANALYSIS document. Based on the parsed dependency data provided, create a comprehensive overview of all dependencies used in the project.
-
-            Follow these strict rules:
-            1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
-            2. No YAML frontmatter.
-            3. Start with a top-level # {title}.
-            4. Include a metadata table (Repo, Doc Type, Date, Branch).
-            5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}" and use the Date: {latest_date}.
-            6. Create a comprehensive "Dependency Inventory" section with ALL unique dependencies, their versions, and what they're used for.
-            7. Group dependencies by type (Python, JavaScript, Java, etc.) with clear headers.
-            8. For each dependency, include: name, version constraint, source file, and a brief description of its purpose/use case.
-            9. Include dependency statistics (total count, by type, etc.).
-            10. Add sections for "Critical Dependencies", "Development Dependencies", and "Runtime Dependencies" if applicable.
-            11. Include admonitions for important notes about dependency management, security considerations, or version conflicts.
-            12. End with a "Primary Sources" section listing all dependency files analyzed.
-            """
-        else:
-            system_prompt = f"""
-            You are a technical writer generating {doc_id} for the repo '{state.get("repo_name")}'.
-
-            Follow these strict rules:
-            1. Output MkDocs Material-compatible Markdown. Use Material theme features like admonitions (e.g., !!! note, !!! warning, !!! tip), tabs, and icons where appropriate.
-            2. No YAML frontmatter.
-            3. Start with a top-level # {title}.
-            4. Include a metadata table (Repo, Doc Type, Date).
-            5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}" and use the Date: {latest_date}.
-            6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
-            7. Use project-relative paths for file references, without markdown links.
-            8. Include a "Primary Sources" section at the end. Do not use footnotes.
-            9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
-            10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in MkDocs Material code blocks with advanced features:
-                - Use syntax highlighting: ```language
-                - Add descriptive titles for file snippets: ```language title="Descriptive title (filename.ext)"
-                - Add line numbers when showing multi-line code: ```language linenums="1"
-                - Highlight important lines: ```language hl_lines="2-4" (adjust line numbers based on context)
-                - Use annotations for explanations: add (1) in comments and explain below the block
-            11. Include admonitions for important notes, warnings, or tips to enhance readability.
-            """
-
-        user_prompt = f"""
-        Generate the content for document ID {doc_id}.
-
-        Reason/Context:
-        Auto-generated for {doc_id}.
-
-        File Structure:
-        {structure}
-
-        Key Files (with timestamps and line numbers):
-        {relevant_content}
-        """
-
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
-
-        try:
-            response = llm.invoke(messages)
-            logger.info(f"   ✅ Completed {doc_id}: {title}")
-            return {"generated_content": {doc_id: str(response.content)}}
-        except Exception as e:
-            logger.error(f"   ❌ Failed to generate {doc_id}: {e}")
-            return {
-                "generated_content": {
-                    doc_id: f"# Error\nFailed to generate document: {e}"
-                }
-            }
-
-    return node_func
