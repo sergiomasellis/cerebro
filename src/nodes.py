@@ -136,7 +136,6 @@ def plan_documentation(state: AgentState) -> Dict:
     mandatory = {
         "100": "Always generate architecture overview",
         "200": "Always generate business/domain overview",
-        "900": "Always generate CI/CD overview",
     }
     plan: Dict[str, str] = dict(mandatory)
 
@@ -154,8 +153,8 @@ def plan_documentation(state: AgentState) -> Dict:
         "structure": structure[:4000],
         "candidates": candidate_summary,
         "instruction": (
-            'Return JSON mapping doc_id -> reason. Always include "100","200","900","980". '
-            "Keep only doc_ids with evidence (count > 0 or critical)."
+            'Return JSON mapping doc_id -> reason. Always include "100","200". '
+            "Keep only doc_ids with evidence (count > 0). If no evidence, exclude the doc_id."
         ),
     }
 
@@ -288,6 +287,7 @@ async def generate_docs(state: AgentState) -> Dict:
         12. MERMAID RULES: only flowchart syntax; keep labels alphanumeric/spaces; no special chars (<, >, :, |); each edge must end at a valid node; prefer `A[Label] --> B[Label]`; avoid indentation; use consistent arrow style.
         13. PRIMARY SOURCES RULES: do not output placeholders like "Sources: 1 2"; always reference footnotes as `Sources: [^1] [^2]` and define them at the end with project-relative paths only (strip any temp/local prefixes). Omit the section if there are no sources.
         14. TABS: You may use MkDocs Material tabbed syntax (pymdownx.tabbed, e.g., `=== "Title"`) when it improves clarity.
+        15. ACCURACY: If a topic or data is not present in the provided content, explicitly say "Not found in repository" and do NOT invent or speculate. Do not fabricate CI/CD, APIs, or other sections when no evidence exists.
         {extra_sections}
         """
 
@@ -607,7 +607,7 @@ def create_overview(state: AgentState) -> Dict:
     8. Use admonitions for important notes.
     9. Include a Mermaid diagram showing the overall system architecture if possible. MERMAID RULES: use flowchart syntax only; consistent arrow style; no special characters in labels (<, >, :, |); ensure every edge has a valid target; keep labels short and alphanumeric with spaces; prefer `A[Label] --> B[Label]`.
     10. Include a brief "Agent Workflow & Large Files" note describing repo scan, candidate selection, chunked reads for oversized files, and how prompts (e.g., AGENTS.md/example.prompt.md) drive documentation generation.
-    10. End with a "Primary Sources" section using markdown footnotes (e.g., [^1]: docs/xyz.md) listing all documents used. Every footnote must be referenced at least once (e.g., add `Sources: [^1] [^2]` before the definitions). If no sources, omit the section. Use project-relative paths only (no temp/local prefixes). Tabs are allowed (pymdownx.tabbed `=== "Title"`) when they improve clarity.
+    10. End with a "Primary Sources" section using markdown footnotes (e.g., [^1]: docs/xyz.md) listing all documents used. Every footnote must be referenced at least once (e.g., add `Sources: [^1] [^2]` before the definitions). If no sources, omit the section. Use project-relative paths only (no temp/local prefixes). Tabs are allowed (pymdownx.tabbed `=== "Title"`) when they improve clarity. If information is missing, state "Not found in repository" instead of speculating.
 
     Complete File Listing (ALL files in repository):
     {all_files_info}
