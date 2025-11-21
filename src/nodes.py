@@ -233,27 +233,38 @@ async def generate_docs(state: AgentState) -> Dict:
         logger.info(f"   🤖 Generating {doc_id}: {title}...")
         all_candidates = doc_candidates.get(doc_id, [])
         max_candidates = max_rag_candidates if doc_id == "980" else max_default_candidates
+
+        def batched(seq, size):
+            for i in range(0, len(seq), size):
+                yield seq[i : i + size]
+
+        candidate_batches = list(batched(sorted(all_candidates, key=lambda p: file_sizes.get(p, 0)), max_candidates))
         if len(all_candidates) > max_candidates:
-            candidate_paths = sorted(
-                all_candidates, key=lambda p: file_sizes.get(p, 0)
-            )[:max_candidates]
             logger.info(
-                f"   📑 Sampling {len(candidate_paths)} of {len(all_candidates)} candidates for {doc_id}"
+                f"   📑 Processing {len(all_candidates)} candidates in {len(candidate_batches)} batches of {max_candidates} for {doc_id}"
             )
-        else:
-            candidate_paths = all_candidates
+        doc_content = ""
         if doc_id == "500":
             relevant_content = parse_dependencies(path, state.get("file_index"))
+            relevant_batches = [("deps", relevant_content)]
         else:
-            relevant_content = read_relevant_files(
-                path,
-                doc_id,
-                candidate_paths=candidate_paths,
-                hash_index=hash_index,
-                size_map=file_sizes,
-                max_total_chars=300_000 if doc_id == "980" else 200_000,
-            )
-        latest_date = extract_latest_date(relevant_content)
+            relevant_batches = []
+            if candidate_batches:
+                for idx, batch in enumerate(candidate_batches, 1):
+                    relevant_batches.append((f"{idx}/{len(candidate_batches)}", read_relevant_files(
+                        path,
+                        doc_id,
+                        candidate_paths=batch,
+                        hash_index=hash_index,
+                        size_map=file_sizes,
+                        max_total_chars=300_000 if doc_id == "980" else 200_000,
+                    )))
+            else:
+                # No candidates; still run once with empty content to allow "Not found" messaging
+                relevant_batches.append(("1/1", ""))
+        for batch_label, relevant_content in relevant_batches:
+            latest_date = extract_latest_date(relevant_content)
+            existing_excerpt = doc_content[-8000:] if doc_content else ""
 
         extra_sections = ""
         if doc_id == "100":
@@ -292,17 +303,20 @@ async def generate_docs(state: AgentState) -> Dict:
         """
 
         user_prompt = f"""
-        Generate the content for document ID {doc_id}.
+Generate the content for document ID {doc_id}.
 
-        Reason/Context:
-        {reason}
+Reason/Context:
+{reason}
 
-        File Structure:
-        {structure}
+File Structure:
+{structure}
 
-        Relevant Files (with timestamps and line numbers):
-        {relevant_content}
-        """
+Existing draft (keep and merge; renumber footnotes consistently across batches; do not drop earlier content):
+{existing_excerpt or "None yet"}
+
+New sources batch {batch_label} (with timestamps and line numbers):
+{relevant_content}
+"""
 
         messages = [
             SystemMessage(content=system_prompt),
@@ -312,11 +326,13 @@ async def generate_docs(state: AgentState) -> Dict:
         try:
             async with semaphore:
                 response = await llm.ainvoke(messages)
-            logger.info(f"   ✅ Completed {doc_id}: {title}")
-            return doc_id, str(response.content)
+            doc_content = str(response.content)
         except Exception as e:
-            logger.error(f"   ❌ Failed to generate {doc_id}: {e}")
+            logger.error(f"   ❌ Failed to generate {doc_id} batch {batch_label}: {e}")
             return doc_id, f"# Error\nFailed to generate document: {e}"
+
+        logger.info(f"   ✅ Completed {doc_id}: {title}")
+        return doc_id, doc_content
 
     # Launch all tasks
     logger.info("   🚀 Launching parallel AI generation tasks...")
