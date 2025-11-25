@@ -5,6 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "ast-grep-cli>=0.40.0",
+    "ast-grep-py>=0.40.0",
+    "celery>=5.5.3",
     "deepagents>=0.2.7",
     "dotfiles>=0.6.5",
     "fastapi>=0.121.3",
@@ -18,5 +21,7 @@ dependencies = [
     "pydantic>=2.12.4",
     "pymdown-extensions>=10.17.1",
     "python-dotenv>=1.2.1",
+    "redis>=7.1.0",
     "ruff>=0.14.5",
+    "uuid6>=2025.0.1",
 ]

@@ -1,10 +1,17 @@
 import os
 import tempfile
 import logging
+import asyncio
+import re
 from git import Repo
 from typing import Optional
 import hashlib
 import mimetypes
+import time
+try:
+    from ast_grep_py import SgRoot
+except ImportError:
+    SgRoot = None
 from datetime import datetime
 
 logger = logging.getLogger("cerebro")
@@ -129,6 +136,7 @@ def build_file_index(root_path: str, max_files: int = DEFAULT_MAX_FILES):
     structure_lines: list[str] = []
     root_path = os.path.abspath(root_path)
     total_files = 0
+    start_time = time.perf_counter()
 
     for current_root, dirs, file_names in os.walk(root_path):
         dirs[:] = [
@@ -179,6 +187,9 @@ def build_file_index(root_path: str, max_files: int = DEFAULT_MAX_FILES):
         if total_files >= max_files:
             break
 
+
+    elapsed = time.perf_counter() - start_time
+    logger.info(f"File index built in {elapsed:.4f}s")
     return {
         "files": files,
         "hash_index": hash_index,
@@ -839,6 +850,76 @@ def select_doc_candidates(file_index: list[dict]) -> dict[str, list[str]]:
     return candidates
 
 
+# In-memory cache for file content: {abs_path: (mtime, content)}
+file_cache: dict[str, tuple[float, str]] = {}
+
+def extract_code_structure(content: str, lang: str) -> str:
+    """
+    Extracts code structure (classes, functions) using ast-grep.
+    Returns a simplified version of the code.
+    """
+    if not SgRoot:
+        return content
+
+    try:
+        root = SgRoot(content, lang)
+        node = root.root()
+        lines = []
+        
+        # Simple extraction: just list classes and functions
+        # This is a basic implementation; can be enhanced
+        
+        # Classes
+        classes = node.find_all(kind="class_definition")
+        for cls in classes:
+            name_node = cls.field("name")
+            name = name_node.text() if name_node else "Unknown"
+            lines.append(f"class {name}: ...")
+
+        # Functions
+        functions = node.find_all(kind="function_definition")
+        for func in functions:
+            name_node = func.field("name")
+            name = name_node.text() if name_node else "Unknown"
+            lines.append(f"def {name}(...): ...")
+            
+        if not lines:
+            return content # Fallback if nothing found (e.g. script)
+            
+        return "\n".join(lines)
+    except Exception as e:
+        logging.getLogger("cerebro").warning(f"ast-grep extraction failed: {e}")
+        return content
+
+async def read_relevant_files_async(
+    root_path: str,
+    doc_id: str,
+    candidate_paths: Optional[list[str]] = None,
+    hash_index: Optional[dict[str, list[str]]] = None,
+    max_total_chars: int = 500_000,
+    size_map: Optional[dict[str, int]] = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    max_chunks_per_file: int = DEFAULT_MAX_CHUNKS_PER_FILE,
+    smart_mode: bool = False,
+) -> str:
+    """
+    Async version of read_relevant_files.
+    Reads content of files relevant to a specific doc type with git metadata and line numbers.
+    Uses asyncio.to_thread for non-blocking I/O and implements caching.
+    """
+    return await asyncio.to_thread(
+        read_relevant_files,
+        root_path,
+        doc_id,
+        candidate_paths,
+        hash_index,
+        max_total_chars,
+        size_map,
+        chunk_size,
+        max_chunks_per_file,
+        smart_mode
+    )
+
 def read_relevant_files(
     root_path: str,
     doc_id: str,
@@ -848,6 +929,7 @@ def read_relevant_files(
     size_map: Optional[dict[str, int]] = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     max_chunks_per_file: int = DEFAULT_MAX_CHUNKS_PER_FILE,
+    smart_mode: bool = False,
 ) -> str:
     """
     Reads content of files relevant to a specific doc type with git metadata and line numbers.
@@ -857,7 +939,9 @@ def read_relevant_files(
     content: list[str] = []
     total_chars = 0
     seen_hashes = set()
+
     path_hash_map: dict[str, str] = {}
+    start_time = time.perf_counter()
     if hash_index:
         for sha, paths in hash_index.items():
             for rel in paths:
@@ -951,30 +1035,69 @@ def read_relevant_files(
                     if total_chars >= max_total_chars:
                         break
             else:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
+                # Check cache first
+                try:
+                    mtime = os.path.getmtime(path)
+                    if path in file_cache:
+                        cached_mtime, cached_content = file_cache[path]
+                        if cached_mtime == mtime:
+                            lines = cached_content.splitlines(keepends=True)
+                            # Skip file read, use cached lines
+                            # But we still need to do the line numbering and truncation logic below
+                            # which expects 'lines'
+                        else:
+                            # Cache invalid
+                            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                                content_str = f.read()
+                                file_cache[path] = (mtime, content_str)
+                                lines = content_str.splitlines(keepends=True)
+                    else:
+                        # Not in cache
+                        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                            content_str = f.read()
+                            file_cache[path] = (mtime, content_str)
+                            lines = content_str.splitlines(keepends=True)
+                except (UnicodeDecodeError, OSError):
+                    continue
+
+
+
+                # AST-Grep Smart Mode
+                if smart_mode and path.endswith(".py"):
+                    try:
+                        # Re-join lines to get full content for AST parsing
+                        full_content = "".join(lines)
+                        structure = extract_code_structure(full_content, "python")
+                        lines = structure.splitlines(keepends=True)
+                        # Reset file size check effectively since we reduced content
+                        file_size = len(structure) 
+                    except Exception:
+                        pass # Fallback to full content
+
+                if file_size <= chunk_size:
+                    numbered_lines = []
+                    char_count = 0
+                    limit_reached = False
+
+                    for i, line in enumerate(lines, 1):
+                        if char_count > 10000:
+                            limit_reached = True
+                            break
+                        formatted_line = f"{i:4d} | {line}"
+                        numbered_lines.append(formatted_line)
+                        char_count += len(formatted_line)
+
+                    file_content = "".join(numbered_lines)
+                    if limit_reached:
+                        file_content += "\n... [File truncated] ...\n"
+
+                    header = f"--- {rel_path} (Last modified: {last_modified}) ---"
+                    content.append(f"{header}\n{file_content}\n")
+                    total_chars += char_count
+
         except (UnicodeDecodeError, OSError):
             continue
 
-        if file_size <= chunk_size:
-            numbered_lines = []
-            char_count = 0
-            limit_reached = False
-
-            for i, line in enumerate(lines, 1):
-                if char_count > 10000:
-                    limit_reached = True
-                    break
-                formatted_line = f"{i:4d} | {line}"
-                numbered_lines.append(formatted_line)
-                char_count += len(formatted_line)
-
-            file_content = "".join(numbered_lines)
-            if limit_reached:
-                file_content += "\n... [File truncated] ...\n"
-
-            header = f"--- {rel_path} (Last modified: {last_modified}) ---"
-            content.append(f"{header}\n{file_content}\n")
-            total_chars += char_count
-
+    elapsed = time.perf_counter() - start_time
+    logger.info(f"read_relevant_files for {doc_id} took {elapsed:.4f}s")
     return "\n".join(content)
