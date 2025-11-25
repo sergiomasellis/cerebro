@@ -1,9 +1,10 @@
 import os
 import json
-import uuid
+import uuid6
 import logging
 import asyncio
 import re
+import time
 from datetime import datetime
 from typing import Dict
 from langchain_openai import ChatOpenAI
@@ -13,6 +14,7 @@ from .utils import (
     clone_repo,
     build_file_index,
     read_relevant_files,
+    read_relevant_files_async,
     parse_dependencies,
     select_doc_candidates,
 )
@@ -93,7 +95,7 @@ def clone_node(state: AgentState) -> Dict:
     file_index = index_result["files"]
     hash_index = index_result["hash_index"]
     repo_name = url.split("/")[-1].replace(".git", "")
-    run_id = str(uuid.uuid4())
+    run_id = str(uuid6.uuid7())
 
     # Get current branch name
     try:
@@ -190,6 +192,7 @@ def plan_documentation(state: AgentState) -> Dict:
 async def generate_docs(state: AgentState) -> Dict:
     """Generates content for all planned docs in parallel."""
     logger.info("🔄 STAGE 3/7: Generating Documentation")
+    start_time = time.perf_counter()
     plan = state["planned_docs"]
     planned_count = len(plan)
 
@@ -251,13 +254,14 @@ async def generate_docs(state: AgentState) -> Dict:
             relevant_batches = []
             if candidate_batches:
                 for idx, batch in enumerate(candidate_batches, 1):
-                    relevant_batches.append((f"{idx}/{len(candidate_batches)}", read_relevant_files(
+                    relevant_batches.append((f"{idx}/{len(candidate_batches)}", await read_relevant_files_async(
                         path,
                         doc_id,
                         candidate_paths=batch,
                         hash_index=hash_index,
                         size_map=file_sizes,
                         max_total_chars=300_000 if doc_id == "980" else 200_000,
+                        smart_mode=(doc_id in ["100", "200"]),
                     )))
             else:
                 # No candidates; still run once with empty content to allow "Not found" messaging
@@ -291,12 +295,12 @@ async def generate_docs(state: AgentState) -> Dict:
         5. **METADATA REQUIREMENT**: In the metadata table, you MUST include the branch name: "{state.get("branch_name")}".
         6. **METADATA REQUIREMENT**: When citing files, refer to the "Last modified" dates provided in the file headers.
         7. Use project-relative paths for file references, without markdown links.
-        8. Include a "Primary Sources" section at the end using markdown footnotes (e.g., [^1]: path/to/file.ext). Every footnote must be referenced at least once (e.g., add a line `Sources: [^1] [^2]` before the definitions). If no sources, omit the section.
+        8. Include a "Primary Sources" section at the end using markdown footnotes (e.g., [^1]: path/to/file.ext). Cite these footnotes INLINE immediately after the file reference (e.g., "In utils.py[^1]..."). Do NOT add a "Sources: ..." line at the end. If no sources, omit the section.
         9. If {doc_id} in ["100", "101", "311", "421"], INCLUDE A MERMAID DIAGRAM.
         10. Include small, relevant code snippets (3-10 lines) from the provided files to illustrate key concepts, wrapped in ```language blocks (e.g., ```python title="Descriptive title (filename.ext)", ```typescript).
         11. Include admonitions for important notes, warnings, or tips to enhance readability.
         12. MERMAID RULES: only flowchart syntax; keep labels alphanumeric/spaces; no special chars (<, >, :, |); each edge must end at a valid node; prefer `A[Label] --> B[Label]`; avoid indentation; use consistent arrow style.
-        13. PRIMARY SOURCES RULES: do not output placeholders like "Sources: 1 2"; always reference footnotes as `Sources: [^1] [^2]` and define them at the end with project-relative paths only (strip any temp/local prefixes). Omit the section if there are no sources.
+        13. PRIMARY SOURCES RULES: do not output placeholders like "Sources: 1 2"; always use inline citations like `[^1]` in the text. Define the footnotes at the end with project-relative paths only (strip any temp/local prefixes). Omit the section if there are no sources.
         14. TABS: You may use MkDocs Material tabbed syntax (pymdownx.tabbed, e.g., `=== "Title"`) when it improves clarity.
         15. ACCURACY: If a topic or data is not present in the provided content, explicitly say "Not found in repository" and do NOT invent or speculate. Do not fabricate CI/CD, APIs, or other sections when no evidence exists.
         {extra_sections}
@@ -342,7 +346,8 @@ New sources batch {batch_label} (with timestamps and line numbers):
     generated = {doc_id: content for doc_id, content in results}
 
     logger.info(f"   ✅ Generated {len(generated)} documentation sections successfully")
-    logger.info("   ✅ Documentation generation complete")
+    elapsed = time.perf_counter() - start_time
+    logger.info(f"   ✅ Documentation generation complete in {elapsed:.2f}s")
     return {"generated_content": generated}
 
 
@@ -501,41 +506,34 @@ site_url: ''
 theme:
   name: material
   palette:
-    # Palette toggle for automatic mode
-    - media: "(prefers-color-scheme)"
-      primary: black
-      accent: orange
+    # Dark-first palette with orange highlights
+    - scheme: slate
+      primary: custom
+      accent: deep orange
       toggle:
-        icon: material/brightness-auto
+        icon: material/white-balance-sunny
         name: Switch to light mode
 
-    # Palette toggle for light mode
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: black
-      accent: orange
+    # Optional light mode for users who prefer it
+    - scheme: default
+      primary: custom
+      accent: deep orange
       toggle:
-        icon: material/brightness-7
+        icon: material/weather-night
         name: Switch to dark mode
-
-    # Palette toggle for dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: black
-      accent: orange
-      toggle:
-        icon: material/brightness-4
-        name: Switch to system preference
   features:
-     - navigation.tabs
-     - navigation.sections
-     - toc.integrate
-     - search.suggest
-     - search.highlight
-     - content.code.copy
-     - content.code.annotate
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
   icon:
     repo: fontawesome/brands/github
+
+extra_css:
+  - styles/theme.css
 
 markdown_extensions:
   - admonition
@@ -563,6 +561,65 @@ nav:
         title = titles.get(doc_id, slug.replace("-", " ").title())
         filename = f"{doc_id}-{slug}.md"
         mkdocs_config += f"  - '{title}': {filename}\n"
+
+    styles_dir = os.path.join(docs_path, "styles")
+    os.makedirs(styles_dir, exist_ok=True)
+    theme_css = """
+:root {
+  --md-primary-fg-color: #ff8a1f;
+  --md-primary-fg-color--light: #ffb14a;
+  --md-primary-fg-color--dark: #d66900;
+  --md-accent-fg-color: #ff9c2f;
+}
+
+[data-md-color-scheme="default"],
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #0f131a;
+  --md-default-fg-color: #e8ecf1;
+  --md-default-fg-color--light: #f5f7fb;
+  --md-default-fg-color--lighter: #cfd6e1;
+  --md-default-fg-color--lightest: #aeb7c4;
+  --md-typeset-a-color: #ff9c2f;
+  --md-typeset-a-color--hover: #ffb14a;
+  --md-code-bg-color: #111827;
+  --md-code-fg-color: #e8ecf1;
+  --md-code-hl-color: #172033;
+  --md-code-border-color: #1b2433;
+  --md-shadow-z2: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: #0c1016;
+}
+
+[data-md-color-scheme="slate"] .md-sidebar__scrollwrap,
+[data-md-color-scheme="slate"] .md-nav--primary {
+  background-color: #0c1016;
+}
+
+[data-md-color-scheme="slate"] .md-nav__link--active,
+[data-md-color-scheme="slate"] .md-nav__link:focus,
+[data-md-color-scheme="slate"] .md-nav__link:hover {
+  color: #ffb14a;
+}
+
+[data-md-color-scheme="slate"] .md-button--primary {
+  background-color: #ff9c2f;
+  border-color: #ff9c2f;
+  color: #0f131a;
+}
+
+[data-md-color-scheme="slate"] .md-button--primary:hover {
+  background-color: #ffb14a;
+  border-color: #ffb14a;
+  color: #0a0d12;
+}
+"""
+    styles_path = os.path.join(styles_dir, "theme.css")
+    with open(styles_path, "w", encoding="utf-8") as css_file:
+        css_file.write(theme_css)
+    logger.info(f"   🎨 Theme overrides written to {styles_path}")
 
     with open(os.path.join(base_output_dir, "mkdocs.yml"), "w", encoding="utf-8") as f:
         f.write(mkdocs_config)
@@ -623,7 +680,7 @@ def create_overview(state: AgentState) -> Dict:
     8. Use admonitions for important notes.
     9. Include a Mermaid diagram showing the overall system architecture if possible. MERMAID RULES: use flowchart syntax only; consistent arrow style; no special characters in labels (<, >, :, |); ensure every edge has a valid target; keep labels short and alphanumeric with spaces; prefer `A[Label] --> B[Label]`.
     10. Include a brief "Agent Workflow & Large Files" note describing repo scan, candidate selection, chunked reads for oversized files, and how prompts (e.g., AGENTS.md/example.prompt.md) drive documentation generation.
-    10. End with a "Primary Sources" section using markdown footnotes (e.g., [^1]: docs/xyz.md) listing all documents used. Every footnote must be referenced at least once (e.g., add `Sources: [^1] [^2]` before the definitions). If no sources, omit the section. Use project-relative paths only (no temp/local prefixes). Tabs are allowed (pymdownx.tabbed `=== "Title"`) when they improve clarity. If information is missing, state "Not found in repository" instead of speculating.
+    10. End with a "Primary Sources" section using markdown footnotes (e.g., [^1]: docs/xyz.md) listing all documents used. Cite these footnotes INLINE immediately after the file reference (e.g., "As seen in the architecture doc[^1]..."). Do NOT add a "Sources: ..." line. Define the footnotes at the end using project-relative paths only. Tabs are allowed (pymdownx.tabbed `=== "Title"`) when they improve clarity. If information is missing, state "Not found in repository" instead of speculating.
 
     Complete File Listing (ALL files in repository):
     {all_files_info}
@@ -690,6 +747,7 @@ def create_overview(state: AgentState) -> Dict:
     Do not include the document list - that will be added separately.
     Do not include YAML frontmatter.
     Use proper markdown formatting that works with MkDocs Material theme.
+    If you reference specific files, use markdown footnotes (e.g., [^1]: path/to/file.ext) and cite them INLINE immediately after the reference (e.g., utils.py[^1]). Define footnotes at the end.
 
     Complete File Listing (ALL files in repository):
     {all_files_info}
