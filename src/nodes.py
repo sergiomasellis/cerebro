@@ -16,8 +16,14 @@ from .utils import (
     read_relevant_files,
     read_relevant_files_async,
     parse_dependencies,
+    read_relevant_files,
+    read_relevant_files_async,
+    parse_dependencies,
     select_doc_candidates,
 )
+from .config import settings
+from .models import CerebroConfig
+import pydantic
 
 logger = logging.getLogger("cerebro")
 
@@ -66,7 +72,7 @@ DOCS_TAXONOMY = """
 
 
 def get_llm():
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4.1")
+    model_name = settings.OPENAI_MODEL
     return ChatOpenAI(model=model_name, temperature=0.2)
 
 
@@ -126,8 +132,49 @@ def clone_node(state: AgentState) -> Dict:
 
 
 def plan_documentation(state: AgentState) -> Dict:
-    """Decides which documents to generate based on repo content."""
+    """Decides which documents to generate based on repo content and optional config."""
     logger.info("🔄 STAGE 2/7: Planning Documentation")
+    
+    path = state["local_path"]
+    config_path = os.path.join(path, ".cerebro", "cerebro.json")
+    cerebro_config = None
+    
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+                cerebro_config = CerebroConfig(**config_data)
+                logger.info("   ⚙️  Loaded .cerebro/cerebro.json configuration")
+        except Exception as e:
+            logger.warning(f"   ⚠️  Failed to load .cerebro/cerebro.json: {e}")
+
+    # If pages are explicitly defined, use them
+    if cerebro_config and cerebro_config.pages:
+        logger.info(f"   📋 Using explicit page configuration ({len(cerebro_config.pages)} pages)")
+        plan = {}
+        for i, page in enumerate(cerebro_config.pages):
+            # Use title as ID if simple, else generate one
+            # For simplicity, we'll try to map known titles to IDs or use custom IDs
+            # But the system expects specific IDs for some logic (like 100, 200).
+            # If the user provides custom pages, we might lose the taxonomy benefits.
+            # However, the requirement says: "bypass the default cluster-based planning and create exactly the pages you specify"
+            
+            # We need a way to map these custom pages to the doc_id system or extend it.
+            # Let's generate a pseudo-ID for custom pages if they don't match standard ones.
+            # Or better, just use the title as the key if the downstream supports it.
+            # The downstream `generate_docs` uses `titles.get(doc_id, "Document")`.
+            # So if we pass the title as doc_id, it might work if we adjust `generate_docs`.
+            
+            # Let's use a prefix "custom-" + index to avoid collisions and keep order
+            doc_id = f"custom-{i:03d}"
+            plan[doc_id] = f"Explicitly requested page: {page.title}. Purpose: {page.purpose}"
+            
+            # Store metadata for generation
+            state.setdefault("custom_pages", {})[doc_id] = page
+
+        logger.info(f"   📝 Planned {len(plan)} custom pages")
+        return {"planned_docs": plan, "cerebro_config": cerebro_config}
+
     logger.info(
         "   📋 Analyzing repository content to determine relevant documentation..."
     )
@@ -150,13 +197,22 @@ def plan_documentation(state: AgentState) -> Dict:
         candidate_summary[doc_id] = {"count": len(files), "examples": files[:5]}
 
     llm = get_llm()
+    
+    # Inject repo_notes into planning prompt if available
+    repo_notes_context = ""
+    if cerebro_config and cerebro_config.repo_notes:
+        notes_text = "\n".join([f"- {note.content}" for note in cerebro_config.repo_notes])
+        repo_notes_context = f"\nRepository Notes from User:\n{notes_text}\n"
+
     prompt = {
         "taxonomy": DOCS_TAXONOMY,
         "structure": structure[:4000],
         "candidates": candidate_summary,
+        "repo_notes": repo_notes_context,
         "instruction": (
             'Return JSON mapping doc_id -> reason. Always include "100","200". '
             "Keep only doc_ids with evidence (count > 0). If no evidence, exclude the doc_id."
+            "Consider the provided repository notes when making decisions."
         ),
     }
 
@@ -186,7 +242,7 @@ def plan_documentation(state: AgentState) -> Dict:
         f"   📝 Planned {planned_count} documentation sections: {', '.join(plan.keys())}"
     )
     logger.info("   ✅ Documentation planning complete")
-    return {"planned_docs": plan}
+    return {"planned_docs": plan, "cerebro_config": cerebro_config}
 
 
 async def generate_docs(state: AgentState) -> Dict:
@@ -205,10 +261,10 @@ async def generate_docs(state: AgentState) -> Dict:
     doc_candidates = state.get("doc_candidates", {})
     hash_index = state.get("hash_index", {})
     llm = get_llm()
-    semaphore = asyncio.Semaphore(int(os.getenv("CONCURRENT_DOCS", "4")))
+    semaphore = asyncio.Semaphore(settings.CONCURRENT_DOCS)
     file_sizes = {rec["path"]: rec.get("size", 0) for rec in state.get("file_index", [])}
-    max_default_candidates = int(os.getenv("MAX_DOC_CANDIDATES", "120"))
-    max_rag_candidates = int(os.getenv("MAX_RAG_CANDIDATES", "200"))
+    max_default_candidates = settings.MAX_DOC_CANDIDATES
+    max_rag_candidates = settings.MAX_RAG_CANDIDATES
 
     async def generate_single_doc(doc_id: str, reason: str):
         titles = {
@@ -231,7 +287,12 @@ async def generate_docs(state: AgentState) -> Dict:
             "930": "Risks and Decisions",
             "980": "RAG Indexing Guidelines",
         }
-        title = titles.get(doc_id, "Document")
+        
+        custom_page = state.get("custom_pages", {}).get(doc_id)
+        if custom_page:
+            title = custom_page.title
+        else:
+            title = titles.get(doc_id, "Document")
 
         logger.info(f"   🤖 Generating {doc_id}: {title}...")
         all_candidates = doc_candidates.get(doc_id, [])
@@ -304,7 +365,20 @@ async def generate_docs(state: AgentState) -> Dict:
         14. TABS: You may use MkDocs Material tabbed syntax (pymdownx.tabbed, e.g., `=== "Title"`) when it improves clarity.
         15. ACCURACY: If a topic or data is not present in the provided content, explicitly say "Not found in repository" and do NOT invent or speculate. Do not fabricate CI/CD, APIs, or other sections when no evidence exists.
         {extra_sections}
+        {extra_sections}
         """
+        
+        # Inject repo notes if available
+        cerebro_config = state.get("cerebro_config")
+        if cerebro_config and cerebro_config.repo_notes:
+            notes_text = "\n".join([f"- {note.content}" for note in cerebro_config.repo_notes])
+            system_prompt += f"\n\nIMPORTANT REPOSITORY CONTEXT:\n{notes_text}\n"
+            
+        if custom_page:
+            system_prompt += f"\n\nPAGE SPECIFIC INSTRUCTIONS:\nTitle: {custom_page.title}\nPurpose: {custom_page.purpose}\n"
+            if custom_page.page_notes:
+                page_notes = "\n".join([f"- {note}" for note in custom_page.page_notes])
+                system_prompt += f"Notes:\n{page_notes}\n"
 
         user_prompt = f"""
 Generate the content for document ID {doc_id}.
@@ -453,8 +527,16 @@ def write_files(state: AgentState) -> Dict:
         "850": "Runbook Operations",
         "900": "CI/CD Pipeline",
         "930": "Risks and Decisions",
+        "930": "Risks and Decisions",
         "980": "RAG Indexing Guidelines",
     }
+    
+    # Update names/titles for custom pages
+    custom_pages = state.get("custom_pages", {})
+    for doc_id, page in custom_pages.items():
+        slug = page.title.lower().replace(" ", "-")
+        names[doc_id] = slug
+        titles[doc_id] = page.title
 
     final_files = []
     total_docs = len(generated)
